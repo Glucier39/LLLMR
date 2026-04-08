@@ -48,25 +48,33 @@ lllmr_chat <- function(model = "llama3.2",
   
   # Stop any previously running lllmr server
   stop_existing_server()
-  
+
   # Resolve the frontend assets directory
   app_dir <- system.file("app", package = "lllmr")
   if (app_dir == "") {
     app_dir <- file.path(getwd(), "inst", "app")
   }
-  
-  # Build the httpuv app
-  app <- build_app(app_dir = app_dir, model = model)
-  
-  # Start the server
-  server <- httpuv::startServer(host = host, port = port, app = app)
-  
-  # Store server reference for cleanup
-  .lllmr_env$server <- server
+
+  # Launch server in a background process so RStudio's R session stays free.
+  # The blocking httpuv service loop runs in the child; the parent returns
+  # immediately and the console remains usable.
+  server_proc <- callr::r_bg(
+    func = function(app_dir, model, host, port) {
+      lllmr:::run_server(app_dir = app_dir, model = model, host = host, port = port)
+    },
+    args = list(app_dir = app_dir, model = model, host = host, port = port),
+    package = TRUE
+  )
+
+  # Store process handle for cleanup
+  .lllmr_env$server_proc <- server_proc
   .lllmr_env$port <- port
-  
+
+  # Give the background process a moment to bind the port before opening the UI
+  Sys.sleep(1)
+
   url <- paste0("http://", host, ":", port)
-  
+
   message("\n",
           "--- lllmr --------------------------------------------------\n",
           " Chat server running at: ", url, "\n",
@@ -74,7 +82,7 @@ lllmr_chat <- function(model = "llama3.2",
           " \n",
           " Stop with:  lllmr:::stop_existing_server()\n",
           "------------------------------------------------------------\n")
-  
+
   # Launch in Viewer or browser
   if (launch) {
     if (rstudioapi::isAvailable()) {
@@ -83,8 +91,8 @@ lllmr_chat <- function(model = "llama3.2",
       utils::browseURL(url)
     }
   }
-  
-  invisible(server)
+
+  invisible(server_proc)
 }
 
 
@@ -147,12 +155,12 @@ lllmr_status <- function(quiet = FALSE) {
 .lllmr_env <- new.env(parent = emptyenv())
 
 stop_existing_server <- function() {
-  if (!is.null(.lllmr_env$server)) {
+  if (!is.null(.lllmr_env$server_proc)) {
     tryCatch({
-      httpuv::stopServer(.lllmr_env$server)
+      .lllmr_env$server_proc$kill()
       message("Stopped previous lllmr server.")
     }, error = function(e) NULL)
-    .lllmr_env$server <- NULL
+    .lllmr_env$server_proc <- NULL
     .lllmr_env$port <- NULL
   }
 }

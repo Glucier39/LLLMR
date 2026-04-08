@@ -286,3 +286,12 @@ json_response <- function(data, status = 200L) {
     body = jsonlite::toJSON(data, auto_unbox = TRUE, null = "null")
   )
 }
+
+#' Run the httpuv server (blocking) — called in a background process
+#' @keywords internal
+run_server <- function(app_dir, model, host, port) {
+  app <- build_app(app_dir = app_dir, model = model)
+  server <- httpuv::startServer(host = host, port = port, app = app)
+  on.exit(httpuv::stopServer(server), add = TRUE)
+  while (TRUE) httpuv::service(100)
+}
