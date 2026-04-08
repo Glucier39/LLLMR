@@ -45,8 +45,11 @@ build_system_prompt <- function(use_context = TRUE) {
   )
   
   if (!use_context) return(base_prompt)
-  
-  ctx <- tryCatch(gather_context(), error = function(e) NULL)
+
+  # Use context pushed from the main R session (rstudioapi-aware).
+  # Calling gather_context() directly here would fail because this code runs
+  # inside the child httpuv server process where rstudioapi is not available.
+  ctx <- tryCatch(.lllmr_env$cached_context, error = function(e) NULL)
   if (is.null(ctx)) return(base_prompt)
   
   context_block <- "\n--- R SESSION CONTEXT ---\n"

@@ -115,6 +115,11 @@
 
     state.ws.onclose = () => {
       console.log('lllmr: WebSocket closed, reconnecting...');
+      // If a response was in progress, unfreeze the UI so the user can retry
+      if (state.streaming) {
+        finishStreaming();
+        showError('Connection dropped mid-response. Please resend your message.');
+      }
       setTimeout(connectWS, 2000);
     };
 
@@ -135,6 +140,8 @@
         showError(data.content);
         finishStreaming();
         break;
+      case 'heartbeat':
+        break; // keep-alive ping, no action needed
     }
   }
 
@@ -167,25 +174,42 @@
     scrollToBottom();
   }
 
+  // Render is batched via requestAnimationFrame so the browser only repaints
+  // once per frame regardless of how fast tokens arrive. Without this, a fast
+  // model sending 10+ tokens per poll interval triggers a full marked.parse()
+  // + DOM replacement on every token, which freezes the tab for long responses.
+  let renderPending = false;
   function appendToken(token) {
-    if (!state.streamTarget) return;
+    if (!state.streamTarget) {
+      // First token — swap thinking indicator for the assistant message bubble
+      removeThinking();
+      startAssistantMessage();
+    }
     state.streamBuffer += token;
-    // Re-render the full accumulated markdown on each token
-    state.streamTarget.innerHTML = marked.parse(state.streamBuffer);
-    state.streamTarget.classList.add('streaming-cursor');
-    scrollToBottom();
+    if (!renderPending) {
+      renderPending = true;
+      requestAnimationFrame(() => {
+        if (state.streamTarget) {
+          state.streamTarget.innerHTML = marked.parse(state.streamBuffer);
+          state.streamTarget.classList.add('streaming-cursor');
+          scrollToBottom();
+        }
+        renderPending = false;
+      });
+    }
   }
 
   function finishStreaming() {
+    removeThinking(); // in case we finished before the first token arrived
     if (state.streamTarget) {
       state.streamTarget.classList.remove('streaming-cursor');
-      // Final render pass
+      // Final render pass (flush any pending batched tokens)
       state.streamTarget.innerHTML = marked.parse(state.streamBuffer);
     }
     state.streaming = false;
     state.streamTarget = null;
     state.streamBuffer = '';
-    removeThinking();
+    renderPending = false;
     updateSendButton();
     scrollToBottom();
   }
@@ -229,8 +253,8 @@
     updateSendButton();
 
     showThinking();
-    startAssistantMessage();
-    removeThinking();
+    // Don't remove thinking yet — keep it visible until the first token arrives
+    // (models can take 10-20+ seconds to generate the first token on cold load)
 
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
       state.ws.send(JSON.stringify({

@@ -74,6 +74,26 @@ lllmr_chat <- function(model = "llama3.2",
   # Give the background process a moment to bind the port before opening the UI
   Sys.sleep(1)
 
+  # Start a context refresh loop in THIS (main) R session where rstudioapi works.
+  # Every 3 seconds we gather the active file, selection, and environment then
+  # POST them to the server so the system prompt stays current.
+  local_port <- port
+  push_context <- function() {
+    proc <- .lllmr_env$server_proc
+    if (is.null(proc) || !proc$is_alive()) return()   # server gone, stop loop
+    ctx <- tryCatch(gather_context(), error = function(e) NULL)
+    if (!is.null(ctx)) {
+      tryCatch(
+        httr2::request(paste0("http://127.0.0.1:", local_port, "/api/context/update")) |>
+          httr2::req_body_json(ctx) |>
+          httr2::req_perform(),
+        error = function(e) NULL
+      )
+    }
+    later::later(push_context, delay = 3)
+  }
+  later::later(push_context, delay = 2)
+
   url <- paste0("http://", host, ":", port)
 
   message("\n",

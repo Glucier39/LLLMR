@@ -9,8 +9,9 @@
 build_app <- function(app_dir, model) {
   
   # Store mutable state in the package environment
-  .lllmr_env$conversation <- list()
-  .lllmr_env$active_model <- model
+  .lllmr_env$conversation  <- list()
+  .lllmr_env$active_model  <- model
+  .lllmr_env$cached_context <- NULL   # populated by main session via POST
   if (is.null(.lllmr_env$claude_api_key)) {
     .lllmr_env$claude_api_key <- Sys.getenv("ANTHROPIC_API_KEY")
   }
@@ -39,10 +40,20 @@ build_app <- function(app_dir, model) {
         return(json_response(list(model = .lllmr_env$active_model)))
       }
       
-      # GET /api/context
+      # GET /api/context — return context cached from main session
       if (method == "GET" && path == "/api/context") {
-        ctx <- gather_context()
+        ctx <- .lllmr_env$cached_context
+        if (is.null(ctx)) ctx <- list(summary = "No context yet — gathering...")
         return(json_response(ctx))
+      }
+
+      # POST /api/context/update — receives context pushed from main R session
+      if (method == "POST" && path == "/api/context/update") {
+        body <- parse_request_body(req)
+        if (length(body) > 0) {
+          .lllmr_env$cached_context <- body
+        }
+        return(json_response(list(status = "ok")))
       }
       
       # POST /api/insert
@@ -273,12 +284,18 @@ handle_chat_ws <- function(ws, data) {
   # Poll every 50 ms for new tokens written by the worker.
   # All ws$send() calls are wrapped in tryCatch — if the WebSocket closes
   # while streaming, poll exits cleanly instead of crashing and losing the loop.
-  last_line <- 0L
+  last_line    <- 0L
+  poll_count   <- 0L  # used for heartbeat cadence
 
   safe_send <- function(msg) tryCatch(ws$send(msg), error = function(e) NULL)
 
   poll <- function() {
-    keep_going <- TRUE
+    keep_going  <- TRUE
+    poll_count <<- poll_count + 1L
+    # Send a heartbeat ping every ~5 s (100 polls × 50 ms) to prevent
+    # RStudio's Viewer proxy from dropping the WebSocket on idle connections.
+    if (poll_count %% 100L == 0L)
+      safe_send(jsonlite::toJSON(list(type = "heartbeat"), auto_unbox = TRUE))
 
     tryCatch({
 
@@ -454,7 +471,9 @@ serve_static <- function(app_dir, path) {
 parse_request_body <- function(req) {
   tryCatch({
     body_raw <- req$rook.input$read()
-    jsonlite::fromJSON(rawToChar(body_raw))
+    # simplifyDataFrame=FALSE keeps arrays-of-objects as lists-of-lists rather
+    # than collapsing them to data.frames, which would break context processing.
+    jsonlite::fromJSON(rawToChar(body_raw), simplifyDataFrame = FALSE)
   }, error = function(e) list())
 }
 
