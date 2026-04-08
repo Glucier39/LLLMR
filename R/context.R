@@ -57,7 +57,7 @@ build_system_prompt <- function(use_context = TRUE) {
   if (!is.null(ctx$active_file) && nzchar(ctx$active_file$content)) {
     context_block <- paste0(context_block,
                             "\n[Active File: ", ctx$active_file$path, "]\n",
-                            "```\n", truncate_string(ctx$active_file$content, 3000), "\n```\n"
+                            "```\n", truncate_string(ctx$active_file$content, 50000), "\n```\n"
     )
   }
   
@@ -108,11 +108,14 @@ get_active_file <- function() {
   tryCatch({
     if (!rstudioapi::isAvailable()) return(NULL)
     doc <- rstudioapi::getSourceEditorContext()
-    if (is.null(doc) || is.null(doc$path)) return(NULL)
+    if (is.null(doc)) return(NULL)
+    content <- paste(doc$contents, collapse = "\n")
+    if (!nzchar(trimws(content))) return(NULL)
+    has_path <- !is.null(doc$path) && nzchar(doc$path)
     list(
-      path = basename(doc$path),
-      full_path = doc$path,
-      content = paste(doc$contents, collapse = "\n")
+      path      = if (has_path) basename(doc$path) else "(unsaved)",
+      full_path = if (has_path) doc$path else "",
+      content   = content
     )
   }, error = function(e) NULL)
 }
@@ -194,7 +197,7 @@ get_project_files <- function() {
 # -- Helpers -------------------------------------------------------------------
 
 #' @keywords internal
-truncate_string <- function(s, max_chars = 3000) {
+truncate_string <- function(s, max_chars = 50000) {
   if (nchar(s) <= max_chars) return(s)
   paste0(substr(s, 1, max_chars), "\n... [truncated]")
 }
@@ -220,6 +223,13 @@ build_context_summary <- function(ctx) {
     parts <- c(parts, paste0(n_hist, " history lines"))
   }
   
-  if (length(parts) == 0) return("No context available")
+  if (length(parts) == 0) {
+    wd <- if (!is.null(ctx$working_directory) && nzchar(ctx$working_directory))
+      basename(ctx$working_directory) else NULL
+    return(paste0(
+      if (!is.null(wd)) paste0("Dir: ", wd, "  |  ") else "",
+      "R ", ctx$r_version
+    ))
+  }
   paste(parts, collapse = "  |  ")
 }

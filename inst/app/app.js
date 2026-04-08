@@ -32,7 +32,7 @@
   const contextToggle = $('#context-toggle');
   const contextBar = $('#context-bar');
   const contextSummary = $('#context-summary');
-  const contextRefresh = $('#context-refresh');
+  const stopBtn = $('#stop-btn');
   const newChatBtn = $('#new-chat-btn');
 
   // Available Claude models
@@ -138,6 +138,9 @@
         break;
       case 'error':
         showError(data.content);
+        finishStreaming();
+        break;
+      case 'stopped':
         finishStreaming();
         break;
       case 'heartbeat':
@@ -446,6 +449,7 @@
     state.streaming = false;
     state.streamBuffer = '';
     state.streamTarget = null;
+    updateSendButton();
     input.focus();
   }
 
@@ -458,6 +462,8 @@
 
   function updateSendButton() {
     sendBtn.disabled = state.streaming || !input.value.trim();
+    sendBtn.classList.toggle('hidden', state.streaming);
+    stopBtn.classList.toggle('hidden', !state.streaming);
   }
 
   function autoResizeInput() {
@@ -503,6 +509,12 @@
 
   sendBtn.addEventListener('click', sendMessage);
 
+  stopBtn.addEventListener('click', () => {
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+      state.ws.send(JSON.stringify({ type: 'stop' }));
+    }
+  });
+
   modelSelect.addEventListener('change', () => {
     state.currentModel = modelSelect.value;
     fetch('/api/model', {
@@ -513,7 +525,6 @@
   });
 
   contextToggle.addEventListener('click', toggleContext);
-  contextRefresh.addEventListener('click', loadContext);
   newChatBtn.addEventListener('click', resetChat);
   providerSelect.addEventListener('change', onProviderChange);
   apiKeySave.addEventListener('click', saveApiKey);
@@ -531,6 +542,8 @@
     // Context is off by default (toggle not active until user enables it)
     contextBar.classList.add('hidden');
 
+    // Sync button visibility to initial state
+    updateSendButton();
     input.focus();
   }
 

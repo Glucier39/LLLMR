@@ -5,6 +5,9 @@
 
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=DM+Mono:wght@400;500&display=swap');
 
+/* -- Utility --------------------------------------------------------------- */
+.hidden { display: none !important; }
+
 /* -- Design tokens --------------------------------------------------------- */
 :root {
   --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -635,6 +638,25 @@ body {
   background: var(--bg-secondary);
   color: var(--text-tertiary);
   cursor: default;
+}
+
+.stop-btn {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #e53e3e;
+  color: white;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+
+.stop-btn:hover {
+  background: #c53030;
 }
 
 .input-footer {

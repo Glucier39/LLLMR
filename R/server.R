@@ -103,9 +103,11 @@ build_app <- function(app_dir, model) {
       ws$onMessage(function(binary, message) {
         tryCatch({
           data <- jsonlite::fromJSON(message)
-          
+
           if (identical(data$type, "chat")) {
             handle_chat_ws(ws, data)
+          } else if (identical(data$type, "stop")) {
+            handle_stop_ws(ws)
           }
         }, error = function(e) {
           ws$send(jsonlite::toJSON(list(
@@ -136,6 +138,21 @@ handle_chat_ws <- function(ws, data) {
   # Build system prompt with optional R context
   system_prompt <- build_system_prompt(use_context)
 
+  # Resolve any @filename mentions — read those files and append to prompt
+  mentioned <- parse_at_mentions(user_message)
+  if (length(mentioned) > 0) {
+    file_contents <- read_mentioned_files(mentioned)
+    if (length(file_contents) > 0) {
+      extra <- paste(vapply(names(file_contents), function(nm) {
+        paste0("\n[Referenced File: ", nm, "]\n```\n",
+               truncate_string(file_contents[[nm]], 50000), "\n```\n")
+      }, character(1)), collapse = "")
+      system_prompt <- paste0(system_prompt,
+                              "\n--- REFERENCED FILES ---\n", extra,
+                              "--- END REFERENCED FILES ---\n")
+    }
+  }
+
   # Append user message to conversation (user/assistant turns only)
   conv <- .lllmr_env$conversation
   conv[[length(conv) + 1L]] <- list(role = "user", content = user_message)
@@ -146,6 +163,12 @@ handle_chat_ws <- function(ws, data) {
   token_file <- tempfile(pattern = "lllmr_tok_")
   done_file  <- tempfile(pattern = "lllmr_done_")
   error_file <- tempfile(pattern = "lllmr_err_")
+
+  # Keep at most the last 40 turns (20 exchanges) to avoid context overflow.
+  trimmed_conv <- .lllmr_env$conversation
+  if (length(trimmed_conv) > 40L) {
+    trimmed_conv <- trimmed_conv[(length(trimmed_conv) - 39L):length(trimmed_conv)]
+  }
 
   if (provider == "claude") {
     # -- Claude API streaming worker -------------------------------------------
@@ -212,7 +235,7 @@ handle_chat_ws <- function(ws, data) {
         })
       },
       args = list(
-        messages      = .lllmr_env$conversation,
+        messages      = trimmed_conv,
         model         = active_model,
         system_prompt = system_prompt,
         api_key       = api_key,
@@ -226,7 +249,7 @@ handle_chat_ws <- function(ws, data) {
     # -- Ollama streaming worker -----------------------------------------------
     ollama_messages <- c(
       list(list(role = "system", content = system_prompt)),
-      .lllmr_env$conversation
+      trimmed_conv
     )
 
     worker <- callr::r_bg(
@@ -281,6 +304,13 @@ handle_chat_ws <- function(ws, data) {
     )
   }
 
+  # Store active worker so the stop handler can kill it
+  .lllmr_env$active_worker     <- worker
+  .lllmr_env$active_token_file <- token_file
+  .lllmr_env$active_done_file  <- done_file
+  .lllmr_env$active_error_file <- error_file
+  .lllmr_env$stop_requested    <- FALSE
+
   # Poll every 50 ms for new tokens written by the worker.
   # All ws$send() calls are wrapped in tryCatch — if the WebSocket closes
   # while streaming, poll exits cleanly instead of crashing and losing the loop.
@@ -290,6 +320,14 @@ handle_chat_ws <- function(ws, data) {
   safe_send <- function(msg) tryCatch(ws$send(msg), error = function(e) NULL)
 
   poll <- function() {
+    # Check if stop was requested by the user
+    if (isTRUE(.lllmr_env$stop_requested)) {
+      .lllmr_env$stop_requested <- FALSE
+      .lllmr_env$active_worker  <- NULL
+      unlink(c(token_file, done_file, error_file))
+      return()  # poll already sent "stopped" from handle_stop_ws
+    }
+
     keep_going  <- TRUE
     poll_count <<- poll_count + 1L
     # Send a heartbeat ping every ~5 s (100 polls × 50 ms) to prevent
@@ -365,6 +403,25 @@ handle_chat_ws <- function(ws, data) {
   }
 
   later::later(poll, delay = 0.05)
+}
+
+
+#' Stop an in-progress streaming response
+#' @keywords internal
+handle_stop_ws <- function(ws) {
+  worker <- .lllmr_env$active_worker
+  if (!is.null(worker)) {
+    tryCatch(worker$kill(), error = function(e) NULL)
+    .lllmr_env$active_worker <- NULL
+  }
+  unlink(c(.lllmr_env$active_token_file,
+           .lllmr_env$active_done_file,
+           .lllmr_env$active_error_file))
+  .lllmr_env$stop_requested <- TRUE
+  tryCatch(
+    ws$send(jsonlite::toJSON(list(type = "stopped"), auto_unbox = TRUE)),
+    error = function(e) NULL
+  )
 }
 
 
@@ -489,6 +546,34 @@ json_response <- function(data, status = 200L) {
     body = jsonlite::toJSON(data, auto_unbox = TRUE, null = "null")
   )
 }
+
+#' Parse @filename mentions from a chat message
+#' @keywords internal
+parse_at_mentions <- function(message) {
+  m <- gregexpr("@[^\\s,;()\\[\\]{}\"']+", message, perl = TRUE)
+  raw <- regmatches(message, m)[[1]]
+  unique(sub("^@", "", raw))
+}
+
+#' Read files referenced by @filename mentions
+#' @keywords internal
+read_mentioned_files <- function(filenames) {
+  ctx  <- .lllmr_env$cached_context
+  root <- if (!is.null(ctx$working_directory) && nzchar(ctx$working_directory))
+    ctx$working_directory else getwd()
+  result <- list()
+  for (fname in filenames) {
+    fpath <- file.path(root, fname)
+    if (!file.exists(fpath) || isTRUE(file.info(fpath)$isdir)) next
+    content <- tryCatch(
+      paste(readLines(fpath, warn = FALSE), collapse = "\n"),
+      error = function(e) NULL
+    )
+    if (!is.null(content)) result[[fname]] <- content
+  }
+  result
+}
+
 
 #' Run the httpuv server (blocking) — called in a background process
 #' @keywords internal

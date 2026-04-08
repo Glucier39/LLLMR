@@ -20,11 +20,11 @@
 #' }
 #'
 #' @export
-lllmr_chat <- function(model = "llama3.2",
+lllmr_chat <- function(model = NULL,
                        port = NULL,
                        host = "127.0.0.1",
                        launch = TRUE) {
-  
+
   # Check Ollama connectivity
   ollama_ok <- lllmr_status(quiet = TRUE)
   if (!ollama_ok) {
@@ -41,6 +41,20 @@ lllmr_chat <- function(model = "llama3.2",
     return(invisible(NULL))
   }
   
+  # Resolve model — auto-select first available if not specified
+  if (is.null(model)) {
+    model <- tryCatch({
+      resp <- httr2::request("http://localhost:11434/api/tags") |>
+        httr2::req_perform()
+      body <- httr2::resp_body_json(resp)
+      if (length(body$models) == 0) NULL else body$models[[1]]$name
+    }, error = function(e) NULL)
+  }
+  if (is.null(model) || !nzchar(model)) {
+    message("No Ollama models found. Pull one first: ollama pull llama3.2")
+    return(invisible(NULL))
+  }
+
   # Pick a port
   if (is.null(port)) {
     port <- httpuv::randomPort(min = 7500, max = 8500)
@@ -196,6 +210,40 @@ stop_existing_server <- function() {
     }
     unlink(.lllmr_lockfile)
   }
+}
+
+.onAttach <- function(libname, pkgname) {
+  tryCatch({
+    resp <- httr2::request("http://localhost:11434/api/tags") |>
+      httr2::req_perform()
+    body <- httr2::resp_body_json(resp)
+    if (length(body$models) == 0) {
+      packageStartupMessage(
+        "\n--- lllmr ---------------------------------------------------\n",
+        " Ollama is running but no models are installed.\n",
+        " Pull one first:  ollama pull llama3.2\n",
+        "-------------------------------------------------------------\n"
+      )
+    } else {
+      model_names <- vapply(body$models, function(m) m$name, character(1))
+      packageStartupMessage(
+        "\n--- lllmr ---------------------------------------------------\n",
+        " Available Ollama models:\n",
+        paste0("   - ", model_names, collapse = "\n"), "\n",
+        " \n",
+        " Start chat: lllmr::lllmr_chat()               # uses first model\n",
+        " Pick model: lllmr::lllmr_chat(model = \"...\")  # specify one above\n",
+        "-------------------------------------------------------------\n"
+      )
+    }
+  }, error = function(e) {
+    packageStartupMessage(
+      "\n--- lllmr ---------------------------------------------------\n",
+      " Ollama not detected. Install and start Ollama, then run:\n",
+      "   lllmr::lllmr_chat()\n",
+      "-------------------------------------------------------------\n"
+    )
+  })
 }
 
 format_bytes <- function(bytes) {
