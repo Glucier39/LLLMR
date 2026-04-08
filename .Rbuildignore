@@ -1,0 +1,14 @@
+^\.claude$
+^\.git$
+^\.gitignore$
+^README\.md$
+^chat\.R$
+^server\.R$
+^context\.R$
+^index\.html$
+^style\.css$
+^app\.js$
+^addins\.dcf$
+^lllmr_.*\.tar\.gz$
+^lllmr\.Rcheck$
+^memory$
