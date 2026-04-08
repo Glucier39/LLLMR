@@ -17,9 +17,7 @@ gather_context <- function() {
     r_version = paste0(R.version$major, ".", R.version$minor),
     platform = R.version$platform
   )
-
-  # Add a human-readable summary
-
+  
   ctx$summary <- build_context_summary(ctx)
   ctx
 }
@@ -45,57 +43,57 @@ build_system_prompt <- function(use_context = TRUE) {
     "- If you can see the user's code or data, reference it specifically\n",
     "- When suggesting fixes, explain what was wrong and why your fix works\n"
   )
-
+  
   if (!use_context) return(base_prompt)
-
+  
   ctx <- tryCatch(gather_context(), error = function(e) NULL)
   if (is.null(ctx)) return(base_prompt)
-
+  
   context_block <- "\n--- R SESSION CONTEXT ---\n"
-
+  
   if (!is.null(ctx$active_file) && nzchar(ctx$active_file$content)) {
     context_block <- paste0(context_block,
-      "\n[Active File: ", ctx$active_file$path, "]\n",
-      "```\n", truncate_string(ctx$active_file$content, 3000), "\n```\n"
+                            "\n[Active File: ", ctx$active_file$path, "]\n",
+                            "```\n", truncate_string(ctx$active_file$content, 3000), "\n```\n"
     )
   }
-
+  
   if (!is.null(ctx$selection) && nzchar(ctx$selection)) {
     context_block <- paste0(context_block,
-      "\n[Selected Code]\n",
-      "```\n", ctx$selection, "\n```\n"
+                            "\n[Selected Code]\n",
+                            "```\n", ctx$selection, "\n```\n"
     )
   }
-
+  
   if (length(ctx$environment) > 0) {
     env_lines <- vapply(ctx$environment, function(obj) {
       paste0("  ", obj$name, " : ", obj$type, obj$detail)
     }, character(1))
     context_block <- paste0(context_block,
-      "\n[Global Environment]\n",
-      paste(env_lines, collapse = "\n"), "\n"
+                            "\n[Global Environment]\n",
+                            paste(env_lines, collapse = "\n"), "\n"
     )
   }
-
+  
   if (length(ctx$console_history) > 0) {
     context_block <- paste0(context_block,
-      "\n[Recent Console History]\n",
-      paste(utils::tail(ctx$console_history, 20), collapse = "\n"), "\n"
+                            "\n[Recent Console History]\n",
+                            paste(utils::tail(ctx$console_history, 20), collapse = "\n"), "\n"
     )
   }
-
+  
   if (length(ctx$project_files) > 0) {
     context_block <- paste0(context_block,
-      "\n[Project Files]\n",
-      paste(utils::head(ctx$project_files, 30), collapse = "\n"), "\n"
+                            "\n[Project Files]\n",
+                            paste(utils::head(ctx$project_files, 30), collapse = "\n"), "\n"
     )
   }
-
+  
   context_block <- paste0(context_block,
-    "\n[R ", ctx$r_version, " on ", ctx$platform, "]\n",
-    "\n--- END CONTEXT ---\n"
+                          "\n[R ", ctx$r_version, " on ", ctx$platform, "]\n",
+                          "\n--- END CONTEXT ---\n"
   )
-
+  
   paste0(base_prompt, context_block)
 }
 
@@ -131,16 +129,16 @@ get_selection <- function() {
 get_environment_summary <- function() {
   objs <- ls(envir = .GlobalEnv)
   if (length(objs) == 0) return(list())
-
+  
   lapply(utils::head(objs, 50), function(nm) {
     obj <- tryCatch(get(nm, envir = .GlobalEnv), error = function(e) NULL)
     if (is.null(obj)) {
       return(list(name = nm, type = "unknown", detail = ""))
     }
-
+    
     type <- paste(class(obj), collapse = "/")
     detail <- ""
-
+    
     if (is.data.frame(obj)) {
       detail <- paste0(
         " [", nrow(obj), " x ", ncol(obj), "]",
@@ -156,7 +154,7 @@ get_environment_summary <- function() {
     } else if (is.list(obj)) {
       detail <- paste0(" [", length(obj), " elements]")
     }
-
+    
     list(name = nm, type = type, detail = detail)
   })
 }
@@ -164,7 +162,6 @@ get_environment_summary <- function() {
 #' @keywords internal
 get_console_history <- function() {
   tryCatch({
-    # loadhistory writes to a temp file; read from there
     tmp <- tempfile()
     utils::savehistory(tmp)
     lines <- readLines(tmp, warn = FALSE)
@@ -180,15 +177,13 @@ get_project_files <- function() {
       proj <- rstudioapi::getActiveProject()
       if (!is.null(proj)) {
         files <- list.files(proj, recursive = TRUE, full.names = FALSE)
-        # Filter out common noise
-        files <- files[!grepl("\\.(Rproj\\.user|git|renv)/", files)]
+        files <- files[!grepl("(\\.Rproj\\.user|/\\.git|/renv)/", files)]
         files <- files[!grepl("node_modules/", files)]
         return(utils::head(files, 50))
       }
     }
-    # Fallback: list working directory
     files <- list.files(getwd(), recursive = TRUE, full.names = FALSE)
-    files <- files[!grepl("\\.(git|renv)/|node_modules/", files)]
+    files <- files[!grepl("(\\.git|renv)/|node_modules/", files)]
     utils::head(files, 50)
   }, error = function(e) character(0))
 }
@@ -206,7 +201,7 @@ truncate_string <- function(s, max_chars = 3000) {
 #' @keywords internal
 build_context_summary <- function(ctx) {
   parts <- character(0)
-
+  
   if (!is.null(ctx$active_file)) {
     parts <- c(parts, paste0("File: ", ctx$active_file$path))
   }
@@ -222,7 +217,7 @@ build_context_summary <- function(ctx) {
   if (n_hist > 0) {
     parts <- c(parts, paste0(n_hist, " history lines"))
   }
-
+  
   if (length(parts) == 0) return("No context available")
   paste(parts, collapse = "  |  ")
 }

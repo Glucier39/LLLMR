@@ -7,77 +7,73 @@
 #' @return A list suitable for httpuv::startServer().
 #' @keywords internal
 build_app <- function(app_dir, model) {
-
-  # Conversation history stored per-session (single user, local)
-  conversation <- list()
-
+  
+  # Store mutable state in the package environment
+  .lllmr_env$conversation <- list()
+  .lllmr_env$active_model <- model
+  
   list(
     call = function(req) {
       path <- req$PATH_INFO
       method <- req$REQUEST_METHOD
-
-      # -- API routes ----------------------------------------------------------
-
-      # POST /api/chat — stream a chat completion from Ollama
+      
+      # POST /api/chat
       if (method == "POST" && path == "/api/chat") {
-        return(handle_chat(req, conversation, model))
+        return(handle_chat(req))
       }
-
-      # GET /api/models — list installed Ollama models
+      
+      # GET /api/models
       if (method == "GET" && path == "/api/models") {
         return(handle_models())
       }
-
-      # POST /api/model — switch the active model
+      
+      # POST /api/model
       if (method == "POST" && path == "/api/model") {
         body <- parse_request_body(req)
         if (!is.null(body$model)) {
-          model <<- body$model
+          .lllmr_env$active_model <- body$model
         }
-        return(json_response(list(model = model)))
+        return(json_response(list(model = .lllmr_env$active_model)))
       }
-
-      # GET /api/context — gather R session context
+      
+      # GET /api/context
       if (method == "GET" && path == "/api/context") {
         ctx <- gather_context()
         return(json_response(ctx))
       }
-
-      # POST /api/insert — insert code into the active RStudio editor
+      
+      # POST /api/insert
       if (method == "POST" && path == "/api/insert") {
         body <- parse_request_body(req)
         return(handle_insert(body$code))
       }
-
-      # POST /api/reset — clear conversation history
+      
+      # POST /api/reset
       if (method == "POST" && path == "/api/reset") {
-        conversation <<- list()
+        .lllmr_env$conversation <- list()
         return(json_response(list(status = "ok")))
       }
-
-      # GET /api/status — health check
+      
+      # GET /api/status
       if (method == "GET" && path == "/api/status") {
         return(json_response(list(
           status = "ok",
-          model = model,
+          model = .lllmr_env$active_model,
           ollama = lllmr_status(quiet = TRUE)
         )))
       }
-
-      # -- Static file serving -------------------------------------------------
+      
+      # Static files
       serve_static(app_dir, path)
     },
-
+    
     onWSOpen = function(ws) {
-      # WebSocket handler for streaming chat
       ws$onMessage(function(binary, message) {
         tryCatch({
           data <- jsonlite::fromJSON(message)
-
+          
           if (identical(data$type, "chat")) {
-            handle_chat_ws(ws, data, conversation, model)
-            # Update conversation history after streaming completes
-            # (done inside handle_chat_ws)
+            handle_chat_ws(ws, data)
           }
         }, error = function(e) {
           ws$send(jsonlite::toJSON(list(
@@ -95,27 +91,29 @@ build_app <- function(app_dir, model) {
 
 #' Handle streaming chat via WebSocket
 #' @keywords internal
-handle_chat_ws <- function(ws, data, conversation, model) {
+handle_chat_ws <- function(ws, data) {
   user_message <- data$message
   use_context <- isTRUE(data$use_context)
-  active_model <- if (!is.null(data$model)) data$model else model
-
+  active_model <- if (!is.null(data$model) && nzchar(data$model)) {
+    data$model
+  } else {
+    .lllmr_env$active_model
+  }
+  
   # Build system prompt with optional R context
-
   system_prompt <- build_system_prompt(use_context)
-
+  
   # Append user message to conversation
-  conversation[[length(conversation) + 1]] <<- list(
-    role = "user",
-    content = user_message
-  )
-
+  conv <- .lllmr_env$conversation
+  conv[[length(conv) + 1L]] <- list(role = "user", content = user_message)
+  .lllmr_env$conversation <- conv
+  
   # Build messages array for Ollama
   messages <- c(
     list(list(role = "system", content = system_prompt)),
-    conversation
+    .lllmr_env$conversation
   )
-
+  
   # Stream from Ollama
   tryCatch({
     resp <- httr2::request("http://localhost:11434/api/chat") |>
@@ -125,44 +123,41 @@ handle_chat_ws <- function(ws, data, conversation, model) {
         stream = TRUE
       )) |>
       httr2::req_perform_connection()
-
+    
     full_response <- ""
-
+    
     repeat {
       lines <- httr2::resp_stream_lines(resp, lines = 5)
       if (length(lines) == 0) break
-
+      
       for (line in lines) {
         if (nchar(trimws(line)) == 0) next
         chunk <- tryCatch(jsonlite::fromJSON(line), error = function(e) NULL)
         if (is.null(chunk)) next
-
+        
         if (!is.null(chunk$message$content)) {
           token <- chunk$message$content
           full_response <- paste0(full_response, token)
-
+          
           ws$send(jsonlite::toJSON(list(
             type = "token",
             content = token
           ), auto_unbox = TRUE))
         }
-
+        
         if (isTRUE(chunk$done)) break
       }
     }
-
+    
     close(resp)
-
+    
     # Store assistant response in conversation history
-    conversation[[length(conversation) + 1]] <<- list(
-      role = "assistant",
-      content = full_response
-    )
-
-    ws$send(jsonlite::toJSON(list(
-      type = "done"
-    ), auto_unbox = TRUE))
-
+    conv <- .lllmr_env$conversation
+    conv[[length(conv) + 1L]] <- list(role = "assistant", content = full_response)
+    .lllmr_env$conversation <- conv
+    
+    ws$send(jsonlite::toJSON(list(type = "done"), auto_unbox = TRUE))
+    
   }, error = function(e) {
     ws$send(jsonlite::toJSON(list(
       type = "error",
@@ -174,11 +169,10 @@ handle_chat_ws <- function(ws, data, conversation, model) {
 
 #' Handle non-streaming chat (fallback)
 #' @keywords internal
-handle_chat <- function(req, conversation, model) {
-  body <- parse_request_body(req)
+handle_chat <- function(req) {
   json_response(list(
     info = "Use WebSocket connection for streaming chat.",
-    hint = "Connect to ws://localhost:PORT and send {type:'chat', message:'...'}"
+    hint = "Connect via WebSocket and send {type:'chat', message:'...'}"
   ))
 }
 
@@ -190,12 +184,14 @@ handle_models <- function() {
       httr2::req_perform()
     body <- httr2::resp_body_json(resp)
     models <- lapply(body$models, function(m) {
+      fam <- if (!is.null(m$details$family)) m$details$family else "unknown"
+      params <- if (!is.null(m$details$parameter_size)) m$details$parameter_size else "unknown"
       list(
         name = m$name,
         size = format_bytes(m$size),
         modified = m$modified_at,
-        family = m$details$family %||% "unknown",
-        parameters = m$details$parameter_size %||% "unknown"
+        family = fam,
+        parameters = params
       )
     })
     json_response(list(models = models))
@@ -231,14 +227,12 @@ handle_insert <- function(code) {
 #' Serve static files from the app directory
 #' @keywords internal
 serve_static <- function(app_dir, path) {
-  # Default to index.html
-
   if (path == "/" || path == "") {
     path <- "/index.html"
   }
-
+  
   file_path <- file.path(app_dir, sub("^/", "", path))
-
+  
   if (!file.exists(file_path)) {
     return(list(
       status = 404L,
@@ -246,19 +240,18 @@ serve_static <- function(app_dir, path) {
       body = "Not found"
     ))
   }
-
-  # MIME types
+  
   ext <- tolower(tools::file_ext(file_path))
   mime <- switch(ext,
-    html = "text/html; charset=utf-8",
-    css  = "text/css; charset=utf-8",
-    js   = "application/javascript; charset=utf-8",
-    json = "application/json",
-    svg  = "image/svg+xml",
-    png  = "image/png",
-    "application/octet-stream"
+                 html = "text/html; charset=utf-8",
+                 css  = "text/css; charset=utf-8",
+                 js   = "application/javascript; charset=utf-8",
+                 json = "application/json",
+                 svg  = "image/svg+xml",
+                 png  = "image/png",
+                 "application/octet-stream"
   )
-
+  
   list(
     status = 200L,
     headers = list(
@@ -293,7 +286,3 @@ json_response <- function(data, status = 200L) {
     body = jsonlite::toJSON(data, auto_unbox = TRUE, null = "null")
   )
 }
-
-#' Null-coalescing operator
-#' @keywords internal
-`%||%` <- function(a, b) if (is.null(a)) b else a

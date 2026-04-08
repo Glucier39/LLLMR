@@ -14,14 +14,9 @@
 #'
 #' @examples
 #' \dontrun{
-#' # Basic usage — opens chat in RStudio Viewer
 #' lllmr_chat()
-#'
-#' # Use a specific model
 #' lllmr_chat(model = "codellama")
-#'
-#' # Use a different port
-#' lllmr_chat(port = 8
+#' lllmr_chat(port = 8080)
 #' }
 #'
 #' @export
@@ -29,7 +24,7 @@ lllmr_chat <- function(model = "llama3.2",
                        port = NULL,
                        host = "127.0.0.1",
                        launch = TRUE) {
-
+  
   # Check Ollama connectivity
   ollama_ok <- lllmr_status(quiet = TRUE)
   if (!ollama_ok) {
@@ -45,35 +40,33 @@ lllmr_chat <- function(model = "llama3.2",
             "------------------------------------------------------------\n")
     return(invisible(NULL))
   }
-
+  
   # Pick a port
-
   if (is.null(port)) {
     port <- httpuv::randomPort(min = 7500, max = 8500)
   }
-
+  
   # Stop any previously running lllmr server
   stop_existing_server()
-
+  
   # Resolve the frontend assets directory
   app_dir <- system.file("app", package = "lllmr")
   if (app_dir == "") {
-    # Dev mode fallback — running from source
     app_dir <- file.path(getwd(), "inst", "app")
   }
-
+  
   # Build the httpuv app
   app <- build_app(app_dir = app_dir, model = model)
-
+  
   # Start the server
   server <- httpuv::startServer(host = host, port = port, app = app)
-
+  
   # Store server reference for cleanup
   .lllmr_env$server <- server
   .lllmr_env$port <- port
-
+  
   url <- paste0("http://", host, ":", port)
-
+  
   message("\n",
           "--- lllmr --------------------------------------------------\n",
           " Chat server running at: ", url, "\n",
@@ -81,9 +74,8 @@ lllmr_chat <- function(model = "llama3.2",
           " \n",
           " Stop with:  lllmr:::stop_existing_server()\n",
           "------------------------------------------------------------\n")
-
+  
   # Launch in Viewer or browser
-
   if (launch) {
     if (rstudioapi::isAvailable()) {
       rstudioapi::viewer(url)
@@ -91,7 +83,7 @@ lllmr_chat <- function(model = "llama3.2",
       utils::browseURL(url)
     }
   }
-
+  
   invisible(server)
 }
 
