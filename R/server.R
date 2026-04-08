@@ -125,27 +125,32 @@ handle_chat_ws <- function(ws, data) {
       httr2::req_perform_connection()
     
     full_response <- ""
-    
+    done <- FALSE
+
     repeat {
+      if (done || httr2::resp_stream_is_complete(resp)) break
       lines <- httr2::resp_stream_lines(resp, lines = 5)
       if (length(lines) == 0) break
-      
+
       for (line in lines) {
         if (nchar(trimws(line)) == 0) next
         chunk <- tryCatch(jsonlite::fromJSON(line), error = function(e) NULL)
         if (is.null(chunk)) next
-        
+
         if (!is.null(chunk$message$content)) {
           token <- chunk$message$content
           full_response <- paste0(full_response, token)
-          
+
           ws$send(jsonlite::toJSON(list(
             type = "token",
             content = token
           ), auto_unbox = TRUE))
         }
-        
-        if (isTRUE(chunk$done)) break
+
+        if (isTRUE(chunk$done)) {
+          done <- TRUE
+          break
+        }
       }
     }
     
