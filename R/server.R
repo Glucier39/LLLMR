@@ -114,32 +114,93 @@ handle_chat_ws <- function(ws, data) {
     .lllmr_env$conversation
   )
 
-  # Open streaming connection to Ollama
-  resp <- tryCatch(
-    httr2::request("http://localhost:11434/api/chat") |>
-      httr2::req_body_json(list(
-        model = active_model,
-        messages = messages,
-        stream = TRUE
-      )) |>
-      httr2::req_perform_connection(),
-    error = function(e) {
-      ws$send(jsonlite::toJSON(list(
-        type = "error",
-        content = paste("Ollama error:", e$message)
-      ), auto_unbox = TRUE))
-      NULL
-    }
-  )
-  if (is.null(resp)) return()
+  # Temp files for IPC between the streaming worker and this server process.
+  # The worker appends one JSON token per line to token_file; when done it
+  # writes the full response to done_file; on error it writes to error_file.
+  token_file <- tempfile(pattern = "lllmr_tok_")
+  done_file  <- tempfile(pattern = "lllmr_done_")
+  error_file <- tempfile(pattern = "lllmr_err_")
 
-  # Stream tokens cooperatively via later::later() so the httpuv event loop
-  # keeps running between chunks. Without this, a blocking repeat{} loop
-  # starves httpuv of cycles, dropping WebSocket ping/pong and disconnecting
-  # the browser after the first response.
-  stream_next <- function(full_response) {
-    if (httr2::resp_stream_is_complete(resp)) {
-      close(resp)
+  # Spawn a dedicated worker process for the blocking Ollama HTTP stream.
+  # This keeps the httpuv event loop in the server process completely free.
+  worker <- callr::r_bg(
+    func = function(messages, model, token_file, done_file, error_file) {
+      tryCatch({
+        resp <- httr2::request("http://localhost:11434/api/chat") |>
+          httr2::req_body_json(list(
+            model   = model,
+            messages = messages,
+            stream  = TRUE
+          )) |>
+          httr2::req_perform_connection()
+
+        full_response <- ""
+        done <- FALSE
+
+        repeat {
+          if (done || httr2::resp_stream_is_complete(resp)) break
+          lines <- httr2::resp_stream_lines(resp, lines = 5)
+          if (length(lines) == 0) break
+
+          for (line in lines) {
+            if (nchar(trimws(line)) == 0) next
+            chunk <- tryCatch(jsonlite::fromJSON(line), error = function(e) NULL)
+            if (is.null(chunk)) next
+
+            if (!is.null(chunk$message$content)) {
+              full_response <- paste0(full_response, chunk$message$content)
+              cat(jsonlite::toJSON(
+                list(token = chunk$message$content), auto_unbox = TRUE
+              ), "\n", file = token_file, append = TRUE)
+            }
+
+            if (isTRUE(chunk$done)) { done <- TRUE; break }
+          }
+        }
+
+        close(resp)
+        writeLines(full_response, done_file)
+
+      }, error = function(e) {
+        writeLines(conditionMessage(e), error_file)
+      })
+    },
+    args = list(
+      messages   = messages,
+      model      = active_model,
+      token_file = token_file,
+      done_file  = done_file,
+      error_file = error_file
+    )
+  )
+
+  # Poll every 50 ms for new tokens written by the worker.
+  # later::later() yields between polls so httpuv stays alive.
+  last_line <- 0L
+
+  poll <- function() {
+    # Forward any new token lines to the WebSocket
+    if (file.exists(token_file)) {
+      all_lines <- tryCatch(readLines(token_file, warn = FALSE), error = function(e) character(0))
+      new_lines <- all_lines[seq_along(all_lines) > last_line]
+      last_line <<- length(all_lines)
+
+      for (ln in new_lines) {
+        tok <- tryCatch(jsonlite::fromJSON(ln), error = function(e) NULL)
+        if (!is.null(tok$token)) {
+          ws$send(jsonlite::toJSON(list(type = "token", content = tok$token),
+                                  auto_unbox = TRUE))
+        }
+      }
+    }
+
+    # Check for completion
+    if (file.exists(done_file)) {
+      full_response <- tryCatch(
+        paste(readLines(done_file, warn = FALSE), collapse = "\n"),
+        error = function(e) ""
+      )
+      unlink(c(token_file, done_file, error_file))
       conv <- .lllmr_env$conversation
       conv[[length(conv) + 1L]] <- list(role = "assistant", content = full_response)
       .lllmr_env$conversation <- conv
@@ -147,44 +208,28 @@ handle_chat_ws <- function(ws, data) {
       return()
     }
 
-    lines <- tryCatch(
-      httr2::resp_stream_lines(resp, lines = 5),
-      error = function(e) character(0)
-    )
-
-    done <- FALSE
-    for (line in lines) {
-      if (nchar(trimws(line)) == 0) next
-      chunk <- tryCatch(jsonlite::fromJSON(line), error = function(e) NULL)
-      if (is.null(chunk)) next
-
-      if (!is.null(chunk$message$content)) {
-        full_response <- paste0(full_response, chunk$message$content)
-        ws$send(jsonlite::toJSON(list(
-          type = "token",
-          content = chunk$message$content
-        ), auto_unbox = TRUE))
-      }
-
-      if (isTRUE(chunk$done)) {
-        done <- TRUE
-        break
-      }
+    # Check for worker error
+    if (file.exists(error_file)) {
+      msg <- tryCatch(paste(readLines(error_file, warn = FALSE), collapse = " "),
+                      error = function(e) "unknown error")
+      unlink(c(token_file, done_file, error_file))
+      ws$send(jsonlite::toJSON(list(type = "error", content = paste("Ollama error:", msg)),
+                               auto_unbox = TRUE))
+      return()
     }
 
-    if (done) {
-      close(resp)
-      conv <- .lllmr_env$conversation
-      conv[[length(conv) + 1L]] <- list(role = "assistant", content = full_response)
-      .lllmr_env$conversation <- conv
-      ws$send(jsonlite::toJSON(list(type = "done"), auto_unbox = TRUE))
-    } else {
-      # Yield to the event loop, then read the next batch of tokens
-      later::later(function() stream_next(full_response), delay = 0)
+    # Worker crashed without writing an error file
+    if (!worker$is_alive()) {
+      unlink(c(token_file, done_file, error_file))
+      ws$send(jsonlite::toJSON(list(type = "error", content = "Streaming worker exited unexpectedly"),
+                               auto_unbox = TRUE))
+      return()
     }
+
+    later::later(poll, delay = 0.05)
   }
 
-  later::later(function() stream_next(""), delay = 0)
+  later::later(poll, delay = 0.05)
 }
 
 
