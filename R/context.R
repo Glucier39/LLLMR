@@ -103,10 +103,7 @@ get_active_file <- function() {
     list(
       path      = if (has_path) basename(doc$path) else "(unsaved)",
       full_path = if (has_path) doc$path else "",
-      # For saved files the server reads from disk directly — avoids sending
-      # large file contents through the JSON push mechanism which can silently
-      # drop or corrupt them. Only include content for unsaved buffers.
-      content   = if (has_path) NULL else content
+      content   = content   # always push content — disk read is preferred but this is the fallback
     )
   }, error = function(e) NULL)
 }
@@ -195,23 +192,28 @@ get_project_files <- function() {
 resolve_file_content <- function(active_file) {
   if (is.null(active_file)) return("")
 
-  fp <- active_file$full_path
-  if (!is.null(fp) && nzchar(fp) && file.exists(fp)) {
-    lines <- tryCatch(
-      readLines(fp, warn = FALSE),
-      error = function(e) {
-        cached <- if (!is.null(active_file$content)) active_file$content else ""
-        if (nzchar(cached)) strsplit(cached, "\n", fixed = TRUE)[[1L]] else character(0L)
-      }
-    )
-  } else {
+  lines <- NULL
+
+  # Try reading from disk — preferred over cached content as it is always
+  # current and avoids JSON round-trip corruption of large strings.
+  fp <- if (!is.null(active_file$full_path)) active_file$full_path else ""
+  if (nzchar(fp)) {
+    fp <- path.expand(fp)   # resolve ~ prefixes
+    if (file.exists(fp)) {
+      lines <- tryCatch(readLines(fp, warn = FALSE), error = function(e) NULL)
+    }
+  }
+
+  # Fall back to content that was cached in the push payload (unsaved buffers).
+  if (is.null(lines) || length(lines) == 0L) {
     cached <- if (!is.null(active_file$content)) active_file$content else ""
-    lines  <- if (nzchar(cached)) strsplit(cached, "\n", fixed = TRUE)[[1L]] else character(0L)
+    lines  <- if (nzchar(cached)) strsplit(cached, "\n", fixed = TRUE)[[1L]]
+               else character(0L)
   }
 
   if (length(lines) == 0L) return("")
 
-  # Prefix each line with its line number so the model can cite specific lines.
+  # Prefix each line with its number so the model can cite specific lines.
   width    <- nchar(as.character(length(lines)))
   numbered <- paste0(formatC(seq_along(lines), width = width), ": ", lines)
   paste(numbered, collapse = "\n")

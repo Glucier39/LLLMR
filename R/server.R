@@ -6,11 +6,12 @@
 #' @param model Default Ollama model name.
 #' @return A list suitable for httpuv::startServer().
 #' @keywords internal
-build_app <- function(app_dir, model) {
-  
+build_app <- function(app_dir, model, ollama_url = "http://localhost:11434") {
+
   # Store mutable state in the package environment
   .lllmr_env$conversation  <- list()
   .lllmr_env$active_model  <- model
+  .lllmr_env$ollama_url    <- sub("/$", "", ollama_url)
   .lllmr_env$cached_context <- NULL   # populated by main session via POST
   if (is.null(.lllmr_env$claude_api_key)) {
     key <- Sys.getenv("ANTHROPIC_API_KEY")
@@ -284,9 +285,9 @@ handle_chat_ws <- function(ws, data) {
     )
 
     worker <- callr::r_bg(
-      func = function(messages, model, token_file, done_file, error_file) {
+      func = function(messages, model, ollama_url, token_file, done_file, error_file) {
         tryCatch({
-          resp <- httr2::request("http://localhost:11434/api/chat") |>
+          resp <- httr2::request(paste0(ollama_url, "/api/chat")) |>
             httr2::req_body_json(list(
               model    = model,
               messages = messages,
@@ -329,6 +330,7 @@ handle_chat_ws <- function(ws, data) {
       args = list(
         messages   = ollama_messages,
         model      = active_model,
+        ollama_url = .lllmr_env$ollama_url,
         token_file = token_file,
         done_file  = done_file,
         error_file = error_file
@@ -470,7 +472,7 @@ handle_chat <- function(req) {
 #' @keywords internal
 handle_models <- function() {
   tryCatch({
-    resp <- httr2::request("http://localhost:11434/api/tags") |>
+    resp <- httr2::request(paste0(.lllmr_env$ollama_url, "/api/tags")) |>
       httr2::req_perform()
     body <- httr2::resp_body_json(resp)
     models <- lapply(body$models, function(m) {
@@ -609,7 +611,7 @@ read_mentioned_files <- function(filenames) {
 
 #' Run the httpuv server (blocking) — called in a background process
 #' @keywords internal
-run_server <- function(app_dir, model, host, port) {
+run_server <- function(app_dir, model, host, port, ollama_url = "http://localhost:11434") {
   # Unset RStudio env vars so rstudioapi::isAvailable() returns FALSE immediately
   # from this child process. Without this, rstudioapi tries IPC that never
   # gets a response and can block the event loop indefinitely.
@@ -617,7 +619,7 @@ run_server <- function(app_dir, model, host, port) {
   Sys.unsetenv("RSTUDIO_SESSION_STREAM")
   Sys.unsetenv("RSTUDIO_SESSION_PORT")
 
-  app <- build_app(app_dir = app_dir, model = model)
+  app <- build_app(app_dir = app_dir, model = model, ollama_url = ollama_url)
   server <- httpuv::startServer(host = host, port = port, app = app)
   on.exit(httpuv::stopServer(server), add = TRUE)
   # Call later::run_now() after each service() to ensure later() callbacks fire.

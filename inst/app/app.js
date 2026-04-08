@@ -29,7 +29,6 @@
   const apiKeySave = $('#api-key-save');
   const apiKeyStatus = $('#api-key-status');
   const providerHint = $('#provider-hint');
-  const contextToggle = $('#context-toggle');
   const contextBar = $('#context-bar');
   const contextSummary = $('#context-summary');
   const stopBtn = $('#stop-btn');
@@ -416,13 +415,6 @@
       });
   }
 
-  function toggleContext() {
-    state.contextEnabled = !state.contextEnabled;
-    contextToggle.classList.toggle('active', state.contextEnabled);
-    contextBar.classList.toggle('hidden', !state.contextEnabled);
-    if (state.contextEnabled) loadContext();
-  }
-
   // -- New chat ---------------------------------------------------------------
   function resetChat() {
     fetch('/api/reset', { method: 'POST' }).catch(() => {});
@@ -436,15 +428,8 @@
     welcomeEl.id = 'welcome';
     welcomeEl.innerHTML = `
       <div class="welcome-logo">lllmr</div>
-      <p class="welcome-sub">Local LLM, right inside RStudio</p>
-      <div class="welcome-hints">
-        <button class="hint-chip" data-prompt="Explain my current script and suggest improvements">Explain my code</button>
-        <button class="hint-chip" data-prompt="Find potential bugs or issues in my selected code">Debug selection</button>
-        <button class="hint-chip" data-prompt="Create a ggplot visualization for the data in my environment">Plot my data</button>
-        <button class="hint-chip" data-prompt="What packages would you recommend for my current task?">Suggest packages</button>
-      </div>`;
+      <p class="welcome-sub">Local LLM, right inside RStudio</p>`;
     chatArea.appendChild(welcomeEl);
-    bindHintChips();
 
     state.streaming = false;
     state.streamBuffer = '';
@@ -483,17 +468,6 @@
     return ta.value;
   }
 
-  function bindHintChips() {
-    document.querySelectorAll('.hint-chip').forEach((chip) => {
-      chip.addEventListener('click', () => {
-        input.value = chip.dataset.prompt;
-        autoResizeInput();
-        updateSendButton();
-        sendMessage();
-      });
-    });
-  }
-
   // -- Event listeners --------------------------------------------------------
   input.addEventListener('input', () => {
     autoResizeInput();
@@ -524,7 +498,6 @@
     });
   });
 
-  contextToggle.addEventListener('click', toggleContext);
   newChatBtn.addEventListener('click', resetChat);
   providerSelect.addEventListener('change', onProviderChange);
   apiKeySave.addEventListener('click', saveApiKey);
@@ -539,8 +512,7 @@
     // Don't fetch context on startup — wait for user to enable the toggle
     bindHintChips();
 
-    // Context on by default — show bar and mark toggle active
-    contextToggle.classList.add('active');
+    // Context always on — load summary into bar
     loadContext();
 
     // Sync button visibility to initial state
