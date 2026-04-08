@@ -99,76 +99,92 @@ handle_chat_ws <- function(ws, data) {
   } else {
     .lllmr_env$active_model
   }
-  
+
   # Build system prompt with optional R context
   system_prompt <- build_system_prompt(use_context)
-  
+
   # Append user message to conversation
   conv <- .lllmr_env$conversation
   conv[[length(conv) + 1L]] <- list(role = "user", content = user_message)
   .lllmr_env$conversation <- conv
-  
+
   # Build messages array for Ollama
   messages <- c(
     list(list(role = "system", content = system_prompt)),
     .lllmr_env$conversation
   )
-  
-  # Stream from Ollama
-  tryCatch({
-    resp <- httr2::request("http://localhost:11434/api/chat") |>
+
+  # Open streaming connection to Ollama
+  resp <- tryCatch(
+    httr2::request("http://localhost:11434/api/chat") |>
       httr2::req_body_json(list(
         model = active_model,
         messages = messages,
         stream = TRUE
       )) |>
-      httr2::req_perform_connection()
-    
-    full_response <- ""
+      httr2::req_perform_connection(),
+    error = function(e) {
+      ws$send(jsonlite::toJSON(list(
+        type = "error",
+        content = paste("Ollama error:", e$message)
+      ), auto_unbox = TRUE))
+      NULL
+    }
+  )
+  if (is.null(resp)) return()
+
+  # Stream tokens cooperatively via later::later() so the httpuv event loop
+  # keeps running between chunks. Without this, a blocking repeat{} loop
+  # starves httpuv of cycles, dropping WebSocket ping/pong and disconnecting
+  # the browser after the first response.
+  stream_next <- function(full_response) {
+    if (httr2::resp_stream_is_complete(resp)) {
+      close(resp)
+      conv <- .lllmr_env$conversation
+      conv[[length(conv) + 1L]] <- list(role = "assistant", content = full_response)
+      .lllmr_env$conversation <- conv
+      ws$send(jsonlite::toJSON(list(type = "done"), auto_unbox = TRUE))
+      return()
+    }
+
+    lines <- tryCatch(
+      httr2::resp_stream_lines(resp, lines = 5),
+      error = function(e) character(0)
+    )
+
     done <- FALSE
+    for (line in lines) {
+      if (nchar(trimws(line)) == 0) next
+      chunk <- tryCatch(jsonlite::fromJSON(line), error = function(e) NULL)
+      if (is.null(chunk)) next
 
-    repeat {
-      if (done || httr2::resp_stream_is_complete(resp)) break
-      lines <- httr2::resp_stream_lines(resp, lines = 5)
-      if (length(lines) == 0) break
+      if (!is.null(chunk$message$content)) {
+        full_response <- paste0(full_response, chunk$message$content)
+        ws$send(jsonlite::toJSON(list(
+          type = "token",
+          content = chunk$message$content
+        ), auto_unbox = TRUE))
+      }
 
-      for (line in lines) {
-        if (nchar(trimws(line)) == 0) next
-        chunk <- tryCatch(jsonlite::fromJSON(line), error = function(e) NULL)
-        if (is.null(chunk)) next
-
-        if (!is.null(chunk$message$content)) {
-          token <- chunk$message$content
-          full_response <- paste0(full_response, token)
-
-          ws$send(jsonlite::toJSON(list(
-            type = "token",
-            content = token
-          ), auto_unbox = TRUE))
-        }
-
-        if (isTRUE(chunk$done)) {
-          done <- TRUE
-          break
-        }
+      if (isTRUE(chunk$done)) {
+        done <- TRUE
+        break
       }
     }
-    
-    close(resp)
-    
-    # Store assistant response in conversation history
-    conv <- .lllmr_env$conversation
-    conv[[length(conv) + 1L]] <- list(role = "assistant", content = full_response)
-    .lllmr_env$conversation <- conv
-    
-    ws$send(jsonlite::toJSON(list(type = "done"), auto_unbox = TRUE))
-    
-  }, error = function(e) {
-    ws$send(jsonlite::toJSON(list(
-      type = "error",
-      content = paste("Ollama error:", e$message)
-    ), auto_unbox = TRUE))
-  })
+
+    if (done) {
+      close(resp)
+      conv <- .lllmr_env$conversation
+      conv[[length(conv) + 1L]] <- list(role = "assistant", content = full_response)
+      .lllmr_env$conversation <- conv
+      ws$send(jsonlite::toJSON(list(type = "done"), auto_unbox = TRUE))
+    } else {
+      # Yield to the event loop, then read the next batch of tokens
+      later::later(function() stream_next(full_response), delay = 0)
+    }
+  }
+
+  later::later(function() stream_next(""), delay = 0)
 }
 
 
