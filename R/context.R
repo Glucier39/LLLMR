@@ -17,7 +17,7 @@ gather_context <- function() {
     r_version = paste0(R.version$major, ".", R.version$minor),
     platform = R.version$platform
   )
-  
+
   ctx$summary <- build_context_summary(ctx)
   ctx
 }
@@ -173,18 +173,17 @@ get_console_history <- function() {
 #' @keywords internal
 get_project_files <- function() {
   tryCatch({
-    if (rstudioapi::isAvailable()) {
-      proj <- rstudioapi::getActiveProject()
-      if (!is.null(proj)) {
-        files <- list.files(proj, recursive = TRUE, full.names = FALSE)
-        files <- files[!grepl("(\\.Rproj\\.user|/\\.git|/renv)/", files)]
-        files <- files[!grepl("node_modules/", files)]
-        return(utils::head(files, 50))
-      }
+    root <- if (rstudioapi::isAvailable()) {
+      proj <- tryCatch(rstudioapi::getActiveProject(), error = function(e) NULL)
+      if (!is.null(proj)) proj else getwd()
+    } else {
+      getwd()
     }
-    files <- list.files(getwd(), recursive = TRUE, full.names = FALSE)
-    files <- files[!grepl("(\\.git|renv)/|node_modules/", files)]
-    utils::head(files, 50)
+    # Non-recursive listing only — recursive scans can block for seconds on
+    # large projects and there's no meaningful timeout we can safely apply.
+    files <- list.files(root, recursive = FALSE, full.names = FALSE)
+    files <- files[!grepl("^(\\.git|\\.Rproj\\.user|renv|node_modules|\\.cache)$", files)]
+    utils::head(files, 30)
   }, error = function(e) character(0))
 }
 

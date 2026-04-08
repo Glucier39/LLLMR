@@ -1,5 +1,15 @@
 {
   "permissions": {
+    "allow": [
+      "Bash(Rscript -e 'devtools::document\\(\\)' 2>&1)",
+      "Bash(R CMD build . 2>&1)",
+      "Bash(R CMD INSTALL lllmr_0.1.0.tar.gz 2>&1)",
+      "Bash(rm -f lllmr_0.1.0.tar.gz)",
+      "Bash(R CMD build .)",
+      "Bash(R CMD INSTALL lllmr_0.1.0.tar.gz)",
+      "Bash(PORT=8495)",
+      "Bash(python3 -:*)"
+    ],
     "defaultMode": "bypassPermissions"
   }
 }

@@ -271,58 +271,80 @@ handle_chat_ws <- function(ws, data) {
   }
 
   # Poll every 50 ms for new tokens written by the worker.
-  # later::later() yields between polls so httpuv stays alive.
+  # All ws$send() calls are wrapped in tryCatch — if the WebSocket closes
+  # while streaming, poll exits cleanly instead of crashing and losing the loop.
   last_line <- 0L
 
-  poll <- function() {
-    # Forward any new token lines to the WebSocket
-    if (file.exists(token_file)) {
-      all_lines <- tryCatch(readLines(token_file, warn = FALSE), error = function(e) character(0))
-      new_lines <- all_lines[seq_along(all_lines) > last_line]
-      last_line <<- length(all_lines)
+  safe_send <- function(msg) tryCatch(ws$send(msg), error = function(e) NULL)
 
-      for (ln in new_lines) {
-        tok <- tryCatch(jsonlite::fromJSON(ln), error = function(e) NULL)
-        if (!is.null(tok$token)) {
-          ws$send(jsonlite::toJSON(list(type = "token", content = tok$token),
-                                  auto_unbox = TRUE))
+  poll <- function() {
+    keep_going <- TRUE
+
+    tryCatch({
+
+      # -- Forward any new token lines ------------------------------------------
+      if (file.exists(token_file)) {
+        all_lines <- tryCatch(readLines(token_file, warn = FALSE),
+                              error = function(e) character(0))
+        new_lines <- all_lines[seq_along(all_lines) > last_line]
+        last_line <<- length(all_lines)
+        for (ln in new_lines) {
+          tok <- tryCatch(jsonlite::fromJSON(ln), error = function(e) NULL)
+          if (!is.null(tok$token))
+            safe_send(jsonlite::toJSON(list(type = "token", content = tok$token),
+                                      auto_unbox = TRUE))
         }
       }
-    }
 
-    # Check for completion
-    if (file.exists(done_file)) {
-      full_response <- tryCatch(
-        paste(readLines(done_file, warn = FALSE), collapse = "\n"),
-        error = function(e) ""
-      )
+      # -- Completion -----------------------------------------------------------
+      if (file.exists(done_file)) {
+        resp <- tryCatch(paste(readLines(done_file, warn = FALSE), collapse = "\n"),
+                         error = function(e) "")
+        unlink(c(token_file, done_file, error_file))
+        conv <- .lllmr_env$conversation
+        conv[[length(conv) + 1L]] <- list(role = "assistant", content = resp)
+        .lllmr_env$conversation <- conv
+        safe_send(jsonlite::toJSON(list(type = "done"), auto_unbox = TRUE))
+        keep_going <<- FALSE
+        return()
+      }
+
+      # -- Worker wrote an error ------------------------------------------------
+      if (file.exists(error_file)) {
+        msg <- tryCatch(paste(readLines(error_file, warn = FALSE), collapse = " "),
+                        error = function(e) "unknown error")
+        unlink(c(token_file, done_file, error_file))
+        safe_send(jsonlite::toJSON(list(type = "error", content = msg),
+                                   auto_unbox = TRUE))
+        keep_going <<- FALSE
+        return()
+      }
+
+      # -- Worker crashed with no output ----------------------------------------
+      if (!worker$is_alive()) {
+        stderr_lines <- tryCatch(worker$read_error_lines(), error = function(e) character(0))
+        msg <- if (length(stderr_lines) > 0)
+          paste(stderr_lines, collapse = "\n")
+        else
+          "Streaming worker exited unexpectedly"
+        unlink(c(token_file, done_file, error_file))
+        safe_send(jsonlite::toJSON(list(type = "error", content = msg),
+                                   auto_unbox = TRUE))
+        keep_going <<- FALSE
+        return()
+      }
+
+    }, error = function(e) {
+      # Unexpected error inside poll — kill worker and stop
+      tryCatch(worker$kill(), error = function(e2) NULL)
       unlink(c(token_file, done_file, error_file))
-      conv <- .lllmr_env$conversation
-      conv[[length(conv) + 1L]] <- list(role = "assistant", content = full_response)
-      .lllmr_env$conversation <- conv
-      ws$send(jsonlite::toJSON(list(type = "done"), auto_unbox = TRUE))
-      return()
-    }
+      safe_send(jsonlite::toJSON(list(type = "error",
+                                      content = paste("Internal poll error:", e$message)),
+                                  auto_unbox = TRUE))
+      keep_going <<- FALSE
+    })
 
-    # Check for worker error
-    if (file.exists(error_file)) {
-      msg <- tryCatch(paste(readLines(error_file, warn = FALSE), collapse = " "),
-                      error = function(e) "unknown error")
-      unlink(c(token_file, done_file, error_file))
-      ws$send(jsonlite::toJSON(list(type = "error", content = paste("Ollama error:", msg)),
-                               auto_unbox = TRUE))
-      return()
-    }
-
-    # Worker crashed without writing an error file
-    if (!worker$is_alive()) {
-      unlink(c(token_file, done_file, error_file))
-      ws$send(jsonlite::toJSON(list(type = "error", content = "Streaming worker exited unexpectedly"),
-                               auto_unbox = TRUE))
-      return()
-    }
-
-    later::later(poll, delay = 0.05)
+    if (keep_going) later::later(poll, delay = 0.05)
   }
 
   later::later(poll, delay = 0.05)
@@ -452,8 +474,20 @@ json_response <- function(data, status = 200L) {
 #' Run the httpuv server (blocking) — called in a background process
 #' @keywords internal
 run_server <- function(app_dir, model, host, port) {
+  # Unset RStudio env vars so rstudioapi::isAvailable() returns FALSE immediately
+  # from this child process. Without this, rstudioapi tries IPC that never
+  # gets a response and can block the event loop indefinitely.
+  Sys.unsetenv("RSTUDIO")
+  Sys.unsetenv("RSTUDIO_SESSION_STREAM")
+  Sys.unsetenv("RSTUDIO_SESSION_PORT")
+
   app <- build_app(app_dir = app_dir, model = model)
   server <- httpuv::startServer(host = host, port = port, app = app)
   on.exit(httpuv::stopServer(server), add = TRUE)
-  while (TRUE) httpuv::service(100)
+  # Call later::run_now() after each service() to ensure later() callbacks fire.
+  # httpuv::service() drives the UV loop but doesn't always flush the later queue.
+  while (TRUE) {
+    httpuv::service(50)
+    later::run_now(timeoutSecs = 0)
+  }
 }

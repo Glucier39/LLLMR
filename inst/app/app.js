@@ -9,7 +9,7 @@
   const state = {
     ws: null,
     streaming: false,
-    contextEnabled: true,
+    contextEnabled: false,   // off by default — user opt-in
     currentModel: '',
     provider: 'ollama',
     streamBuffer: '',
@@ -501,11 +501,11 @@
   function init() {
     connectWS();
     loadModels();
-    loadContext();
+    // Don't fetch context on startup — wait for user to enable the toggle
     bindHintChips();
 
-    // Set initial context toggle state
-    contextToggle.classList.add('active');
+    // Context is off by default (toggle not active until user enables it)
+    contextBar.classList.add('hidden');
 
     input.focus();
   }
