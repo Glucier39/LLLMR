@@ -1,4 +1,4 @@
-# lllmr <img src="man/figures/logo.png" align="right" height="120" />
+# lllmr
 
 > **Local Large Language Model in R** — A modern chat interface for local LLMs inside RStudio.
 
@@ -18,21 +18,22 @@ lllmr brings a clean, polished AI chat experience directly into RStudio's Viewer
 
 ### 1. Install Ollama
 
-Download from [ollama.com](https://ollama.com) — it's a one-click installer for Mac, Windows, and Linux.
+Download from [ollama.com](https://ollama.com) — one-click installer for Mac, Windows, and Linux. Ollama starts automatically on login.
 
 ### 2. Pull a model
 
 ```bash
-ollama pull llama3.2
+ollama pull qwen2.5-coder:14b
 ```
 
-Other good options: `codellama`, `mistral`, `deepseek-coder`, `phi3`
+Other good options: `llama3.2`, `codellama`, `mistral`, `deepseek-coder`
 
 ### 3. Install lllmr
 
 ```r
-# From GitHub
-devtools::install_github("yourusername/lllmr")
+# Requires devtools
+install.packages("devtools")
+devtools::install_github("Glucier39/LLLMR")
 ```
 
 ### 4. Chat
@@ -41,27 +42,28 @@ devtools::install_github("yourusername/lllmr")
 lllmr::lllmr_chat()
 ```
 
-That's it. The chat interface opens in your RStudio Viewer pane.
+The chat interface opens in your RStudio Viewer pane. Outside of RStudio it opens in your default browser.
 
 ## Usage
 
 ```r
+# Check that Ollama is running and see installed models
+lllmr::lllmr_status()
+lllmr::lllmr_models()
+
 # Launch with default model (llama3.2)
-lllmr_chat()
+lllmr::lllmr_chat()
 
-# Use a specific model
-lllmr_chat(model = "codellama")
+# Launch with a specific model
+lllmr::lllmr_chat(model = "qwen2.5-coder:14b")
 
-# Check Ollama status
-lllmr_status()
-
-# List installed models
-lllmr_models()
+# Stop the server
+lllmr:::stop_existing_server()
 ```
 
 ### Keyboard Shortcut
 
-lllmr registers as an RStudio Addin. Go to **Tools → Modify Keyboard Shortcuts** and search for "Open lllmr Chat" to bind it.
+lllmr registers as an RStudio Addin. Go to **Tools > Modify Keyboard Shortcuts** and search for "Open lllmr Chat" to bind it.
 
 ## Context Awareness
 
