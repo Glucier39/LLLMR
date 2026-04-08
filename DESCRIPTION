@@ -1,0 +1,22 @@
+Package: lllmr
+Title: Local Large Language Model in R
+Version: 0.1.0
+Authors@R: 
+    person("lllmr contributors", email = "dev@example.com", role = c("aut", "cre"))
+Description: A modern chat interface for local LLMs inside RStudio. Connects to 
+    Ollama for zero-cost, zero-account, fully private AI chat with full R session 
+    context awareness. No API keys, no internet required after model download.
+License: MIT + file LICENSE
+URL: https://github.com/yourusername/lllmr
+BugReports: https://github.com/yourusername/lllmr/issues
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Imports:
+    httpuv (>= 1.6.0),
+    httr2 (>= 1.0.0),
+    jsonlite (>= 1.8.0),
+    rstudioapi (>= 0.14)
+Suggests:
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3

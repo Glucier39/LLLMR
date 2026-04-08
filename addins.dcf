@@ -1,0 +1,4 @@
+Name: Open lllmr Chat
+Description: Launch the local LLM chat interface in the Viewer pane
+Binding: lllmr_chat
+Interactive: true
