@@ -9,7 +9,7 @@
   const state = {
     ws: null,
     streaming: false,
-    contextEnabled: false,   // off by default — user opt-in
+    contextEnabled: true,    // on by default
     currentModel: '',
     provider: 'ollama',
     streamBuffer: '',
@@ -539,8 +539,9 @@
     // Don't fetch context on startup — wait for user to enable the toggle
     bindHintChips();
 
-    // Context is off by default (toggle not active until user enables it)
-    contextBar.classList.add('hidden');
+    // Context on by default — show bar and mark toggle active
+    contextToggle.classList.add('active');
+    loadContext();
 
     // Sync button visibility to initial state
     updateSendButton();

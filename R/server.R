@@ -13,7 +13,15 @@ build_app <- function(app_dir, model) {
   .lllmr_env$active_model  <- model
   .lllmr_env$cached_context <- NULL   # populated by main session via POST
   if (is.null(.lllmr_env$claude_api_key)) {
-    .lllmr_env$claude_api_key <- Sys.getenv("ANTHROPIC_API_KEY")
+    key <- Sys.getenv("ANTHROPIC_API_KEY")
+    if (!nzchar(key)) {
+      keyfile <- path.expand("~/.lllmr_api_key")
+      if (file.exists(keyfile)) {
+        key <- tryCatch(trimws(readLines(keyfile, warn = FALSE)[[1L]]),
+                        error = function(e) "")
+      }
+    }
+    .lllmr_env$claude_api_key <- key
   }
   
   list(
@@ -80,6 +88,11 @@ build_app <- function(app_dir, model) {
         body <- parse_request_body(req)
         if (!is.null(body$key) && nzchar(body$key)) {
           .lllmr_env$claude_api_key <- body$key
+          tryCatch({
+            keyfile <- path.expand("~/.lllmr_api_key")
+            writeLines(body$key, keyfile)
+            Sys.chmod(keyfile, mode = "0600")
+          }, error = function(e) NULL)
           return(json_response(list(status = "ok")))
         }
         return(json_response(list(status = "error", message = "No key provided"),
@@ -135,8 +148,10 @@ handle_chat_ws <- function(ws, data) {
     .lllmr_env$active_model
   }
 
-  # Build system prompt with optional R context
-  system_prompt <- build_system_prompt(use_context)
+  # Build system prompt — Claude has a 200K context window; Ollama uses num_ctx
+  # 32768 tokens which comfortably fits 20K chars of file content plus history.
+  max_file_chars <- if (provider == "claude") 50000L else 20000L
+  system_prompt <- build_system_prompt(use_context, max_file_chars = max_file_chars)
 
   # Resolve any @filename mentions — read those files and append to prompt
   mentioned <- parse_at_mentions(user_message)
@@ -192,7 +207,7 @@ handle_chat_ws <- function(ws, data) {
             ) |>
             httr2::req_body_json(list(
               model      = model,
-              max_tokens = 8192L,
+              max_tokens = 16384L,
               system     = system_prompt,
               messages   = messages,
               stream     = TRUE
@@ -204,7 +219,7 @@ handle_chat_ws <- function(ws, data) {
           repeat {
             if (httr2::resp_stream_is_complete(resp)) break
             lines <- httr2::resp_stream_lines(resp, lines = 10)
-            if (length(lines) == 0) break
+            if (length(lines) == 0) { Sys.sleep(0.05); next }
 
             for (line in lines) {
               line <- trimws(line)
@@ -247,9 +262,25 @@ handle_chat_ws <- function(ws, data) {
 
   } else {
     # -- Ollama streaming worker -----------------------------------------------
+    # Inject context into the user message only on the FIRST turn of a session.
+    # Many Ollama models ignore role:system; embedding context in the user turn
+    # guarantees it is seen. Re-injecting every turn doubles the token cost and
+    # quickly overflows the context window.
+    ollama_conv <- trimmed_conv
+    is_first_message <- length(ollama_conv) == 1L
+    if (use_context && is_first_message) {
+      ctx_inject <- build_context_injection(.lllmr_env$cached_context,
+                                            max_file_chars = max_file_chars)
+      if (nzchar(ctx_inject)) {
+        enriched <- ollama_conv[[1L]]
+        enriched$content <- paste0(ctx_inject, "---\n\n", enriched$content)
+        ollama_conv[[1L]] <- enriched
+      }
+    }
+
     ollama_messages <- c(
       list(list(role = "system", content = system_prompt)),
-      trimmed_conv
+      ollama_conv
     )
 
     worker <- callr::r_bg(
@@ -259,7 +290,8 @@ handle_chat_ws <- function(ws, data) {
             httr2::req_body_json(list(
               model    = model,
               messages = messages,
-              stream   = TRUE
+              stream   = TRUE,
+              options  = list(num_ctx = 32768L)
             )) |>
             httr2::req_perform_connection()
 
@@ -269,7 +301,7 @@ handle_chat_ws <- function(ws, data) {
           repeat {
             if (done || httr2::resp_stream_is_complete(resp)) break
             lines <- httr2::resp_stream_lines(resp, lines = 5)
-            if (length(lines) == 0) break
+            if (length(lines) == 0) { Sys.sleep(0.05); next }
 
             for (line in lines) {
               if (nchar(trimws(line)) == 0) next
