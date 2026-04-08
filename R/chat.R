@@ -66,9 +66,10 @@ lllmr_chat <- function(model = "llama3.2",
     package = TRUE
   )
 
-  # Store process handle for cleanup
+  # Store process handle for cleanup and write lockfile for cross-session cleanup
   .lllmr_env$server_proc <- server_proc
   .lllmr_env$port <- port
+  writeLines(as.character(server_proc$get_pid()), .lllmr_lockfile)
 
   # Give the background process a moment to bind the port before opening the UI
   Sys.sleep(1)
@@ -154,14 +155,26 @@ lllmr_status <- function(quiet = FALSE) {
 # Package-level environment for storing server state
 .lllmr_env <- new.env(parent = emptyenv())
 
+# Lockfile persists the server PID across R sessions for cleanup
+.lllmr_lockfile <- path.expand("~/.lllmr_server.pid")
+
 stop_existing_server <- function() {
+  # Kill in-session process handle
   if (!is.null(.lllmr_env$server_proc)) {
-    tryCatch({
-      .lllmr_env$server_proc$kill()
-      message("Stopped previous lllmr server.")
-    }, error = function(e) NULL)
+    tryCatch(.lllmr_env$server_proc$kill(), error = function(e) NULL)
     .lllmr_env$server_proc <- NULL
     .lllmr_env$port <- NULL
+  }
+  # Kill cross-session stale process via lockfile PID
+  if (file.exists(.lllmr_lockfile)) {
+    pid <- suppressWarnings(
+      tryCatch(as.integer(readLines(.lllmr_lockfile, warn = FALSE)[[1L]]),
+               error = function(e) NA_integer_)
+    )
+    if (!is.na(pid) && pid > 0L) {
+      tryCatch(tools::pskill(pid), error = function(e) NULL)
+    }
+    unlink(.lllmr_lockfile)
   }
 }
 

@@ -11,6 +11,7 @@
     streaming: false,
     contextEnabled: true,
     currentModel: '',
+    provider: 'ollama',
     streamBuffer: '',
     streamTarget: null,
   };
@@ -22,11 +23,24 @@
   const input = $('#message-input');
   const sendBtn = $('#send-btn');
   const modelSelect = $('#model-select');
+  const providerSelect = $('#provider-select');
+  const apiKeyBar = $('#api-key-bar');
+  const apiKeyInput = $('#api-key-input');
+  const apiKeySave = $('#api-key-save');
+  const apiKeyStatus = $('#api-key-status');
+  const providerHint = $('#provider-hint');
   const contextToggle = $('#context-toggle');
   const contextBar = $('#context-bar');
   const contextSummary = $('#context-summary');
   const contextRefresh = $('#context-refresh');
   const newChatBtn = $('#new-chat-btn');
+
+  // Available Claude models
+  const CLAUDE_MODELS = [
+    { name: 'claude-opus-4-6',  label: 'Claude Opus 4.6 (Most capable)' },
+    { name: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (Balanced)' },
+    { name: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (Fast)' },
+  ];
 
   // -- Configure marked.js ----------------------------------------------------
   marked.setOptions({
@@ -224,6 +238,7 @@
         message: text,
         use_context: state.contextEnabled,
         model: state.currentModel,
+        provider: state.provider,
       }));
     } else {
       showError('Not connected to server. Reconnecting...');
@@ -292,6 +307,73 @@
       .catch(() => {
         modelSelect.innerHTML = '<option value="">Ollama offline</option>';
       });
+  }
+
+  function loadClaudeModels() {
+    modelSelect.innerHTML = '';
+    CLAUDE_MODELS.forEach((m) => {
+      const opt = document.createElement('option');
+      opt.value = m.name;
+      opt.textContent = m.label;
+      modelSelect.appendChild(opt);
+    });
+    state.currentModel = CLAUDE_MODELS[0].name;
+    modelSelect.value = state.currentModel;
+  }
+
+  // -- Provider management ----------------------------------------------------
+  function checkApiKey() {
+    fetch('/api/apikey')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.has_key) {
+          apiKeyStatus.textContent = 'Key set';
+          apiKeyStatus.className = 'api-key-status ok';
+        } else {
+          apiKeyStatus.textContent = 'No key — enter below';
+          apiKeyStatus.className = 'api-key-status warn';
+        }
+      })
+      .catch(() => {
+        apiKeyStatus.textContent = '';
+      });
+  }
+
+  function saveApiKey() {
+    const key = apiKeyInput.value.trim();
+    if (!key) return;
+    fetch('/api/apikey', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.status === 'ok') {
+          apiKeyStatus.textContent = 'Key saved';
+          apiKeyStatus.className = 'api-key-status ok';
+          apiKeyInput.value = '';
+        }
+      })
+      .catch(() => {});
+  }
+
+  function onProviderChange() {
+    state.provider = providerSelect.value;
+    if (state.provider === 'claude') {
+      apiKeyBar.classList.remove('hidden');
+      loadClaudeModels();
+      checkApiKey();
+      if (providerHint) {
+        providerHint.textContent = 'Using Claude API — requests are sent to Anthropic';
+      }
+    } else {
+      apiKeyBar.classList.add('hidden');
+      loadModels();
+      if (providerHint) {
+        providerHint.textContent = 'lllmr runs locally via Ollama — your data never leaves your machine';
+      }
+    }
   }
 
   // -- Context management -----------------------------------------------------
@@ -409,6 +491,11 @@
   contextToggle.addEventListener('click', toggleContext);
   contextRefresh.addEventListener('click', loadContext);
   newChatBtn.addEventListener('click', resetChat);
+  providerSelect.addEventListener('change', onProviderChange);
+  apiKeySave.addEventListener('click', saveApiKey);
+  apiKeyInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') saveApiKey();
+  });
 
   // -- Init -------------------------------------------------------------------
   function init() {

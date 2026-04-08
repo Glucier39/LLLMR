@@ -11,6 +11,9 @@ build_app <- function(app_dir, model) {
   # Store mutable state in the package environment
   .lllmr_env$conversation <- list()
   .lllmr_env$active_model <- model
+  if (is.null(.lllmr_env$claude_api_key)) {
+    .lllmr_env$claude_api_key <- Sys.getenv("ANTHROPIC_API_KEY")
+  }
   
   list(
     call = function(req) {
@@ -53,6 +56,24 @@ build_app <- function(app_dir, model) {
         .lllmr_env$conversation <- list()
         return(json_response(list(status = "ok")))
       }
+
+      # GET /api/apikey — check if Claude API key is set
+      if (method == "GET" && path == "/api/apikey") {
+        key <- .lllmr_env$claude_api_key
+        if (is.null(key)) key <- ""
+        return(json_response(list(has_key = nzchar(key))))
+      }
+
+      # POST /api/apikey — set Claude API key for this session
+      if (method == "POST" && path == "/api/apikey") {
+        body <- parse_request_body(req)
+        if (!is.null(body$key) && nzchar(body$key)) {
+          .lllmr_env$claude_api_key <- body$key
+          return(json_response(list(status = "ok")))
+        }
+        return(json_response(list(status = "error", message = "No key provided"),
+                             status = 400L))
+      }
       
       # GET /api/status
       if (method == "GET" && path == "/api/status") {
@@ -93,7 +114,8 @@ build_app <- function(app_dir, model) {
 #' @keywords internal
 handle_chat_ws <- function(ws, data) {
   user_message <- data$message
-  use_context <- isTRUE(data$use_context)
+  use_context  <- isTRUE(data$use_context)
+  provider     <- if (!is.null(data$provider) && nzchar(data$provider)) data$provider else "ollama"
   active_model <- if (!is.null(data$model) && nzchar(data$model)) {
     data$model
   } else {
@@ -103,76 +125,150 @@ handle_chat_ws <- function(ws, data) {
   # Build system prompt with optional R context
   system_prompt <- build_system_prompt(use_context)
 
-  # Append user message to conversation
+  # Append user message to conversation (user/assistant turns only)
   conv <- .lllmr_env$conversation
   conv[[length(conv) + 1L]] <- list(role = "user", content = user_message)
   .lllmr_env$conversation <- conv
 
-  # Build messages array for Ollama
-  messages <- c(
-    list(list(role = "system", content = system_prompt)),
-    .lllmr_env$conversation
-  )
-
-  # Temp files for IPC between the streaming worker and this server process.
-  # The worker appends one JSON token per line to token_file; when done it
-  # writes the full response to done_file; on error it writes to error_file.
+  # Temp files for IPC — worker appends one JSON token per line to token_file,
+  # writes full response to done_file, or error message to error_file.
   token_file <- tempfile(pattern = "lllmr_tok_")
   done_file  <- tempfile(pattern = "lllmr_done_")
   error_file <- tempfile(pattern = "lllmr_err_")
 
-  # Spawn a dedicated worker process for the blocking Ollama HTTP stream.
-  # This keeps the httpuv event loop in the server process completely free.
-  worker <- callr::r_bg(
-    func = function(messages, model, token_file, done_file, error_file) {
-      tryCatch({
-        resp <- httr2::request("http://localhost:11434/api/chat") |>
-          httr2::req_body_json(list(
-            model   = model,
-            messages = messages,
-            stream  = TRUE
-          )) |>
-          httr2::req_perform_connection()
+  if (provider == "claude") {
+    # -- Claude API streaming worker -------------------------------------------
+    api_key <- .lllmr_env$claude_api_key
+    if (is.null(api_key) || !nzchar(api_key)) {
+      ws$send(jsonlite::toJSON(list(
+        type    = "error",
+        content = "Claude API key not set. Enter it in the UI or set ANTHROPIC_API_KEY."
+      ), auto_unbox = TRUE))
+      return()
+    }
 
-        full_response <- ""
-        done <- FALSE
+    worker <- callr::r_bg(
+      func = function(messages, model, system_prompt, api_key,
+                      token_file, done_file, error_file) {
+        tryCatch({
+          resp <- httr2::request("https://api.anthropic.com/v1/messages") |>
+            httr2::req_headers(
+              "x-api-key"         = api_key,
+              "anthropic-version" = "2023-06-01"
+            ) |>
+            httr2::req_body_json(list(
+              model      = model,
+              max_tokens = 8192L,
+              system     = system_prompt,
+              messages   = messages,
+              stream     = TRUE
+            )) |>
+            httr2::req_perform_connection()
 
-        repeat {
-          if (done || httr2::resp_stream_is_complete(resp)) break
-          lines <- httr2::resp_stream_lines(resp, lines = 5)
-          if (length(lines) == 0) break
+          full_response <- ""
 
-          for (line in lines) {
-            if (nchar(trimws(line)) == 0) next
-            chunk <- tryCatch(jsonlite::fromJSON(line), error = function(e) NULL)
-            if (is.null(chunk)) next
+          repeat {
+            if (httr2::resp_stream_is_complete(resp)) break
+            lines <- httr2::resp_stream_lines(resp, lines = 10)
+            if (length(lines) == 0) break
 
-            if (!is.null(chunk$message$content)) {
-              full_response <- paste0(full_response, chunk$message$content)
-              cat(jsonlite::toJSON(
-                list(token = chunk$message$content), auto_unbox = TRUE
-              ), "\n", file = token_file, append = TRUE)
+            for (line in lines) {
+              line <- trimws(line)
+              if (!startsWith(line, "data: ")) next
+              json_str <- substring(line, 7L)
+              if (json_str == "[DONE]") break
+
+              chunk <- tryCatch(jsonlite::fromJSON(json_str), error = function(e) NULL)
+              if (is.null(chunk)) next
+
+              if (identical(chunk$type, "content_block_delta")) {
+                token <- chunk$delta$text
+                if (!is.null(token) && nzchar(token)) {
+                  full_response <- paste0(full_response, token)
+                  cat(jsonlite::toJSON(list(token = token), auto_unbox = TRUE),
+                      "\n", file = token_file, append = TRUE)
+                }
+              }
+              if (identical(chunk$type, "message_stop")) break
             }
-
-            if (isTRUE(chunk$done)) { done <- TRUE; break }
           }
-        }
 
-        close(resp)
-        writeLines(full_response, done_file)
+          close(resp)
+          writeLines(full_response, done_file)
 
-      }, error = function(e) {
-        writeLines(conditionMessage(e), error_file)
-      })
-    },
-    args = list(
-      messages   = messages,
-      model      = active_model,
-      token_file = token_file,
-      done_file  = done_file,
-      error_file = error_file
+        }, error = function(e) {
+          writeLines(conditionMessage(e), error_file)
+        })
+      },
+      args = list(
+        messages      = .lllmr_env$conversation,
+        model         = active_model,
+        system_prompt = system_prompt,
+        api_key       = api_key,
+        token_file    = token_file,
+        done_file     = done_file,
+        error_file    = error_file
+      )
     )
-  )
+
+  } else {
+    # -- Ollama streaming worker -----------------------------------------------
+    ollama_messages <- c(
+      list(list(role = "system", content = system_prompt)),
+      .lllmr_env$conversation
+    )
+
+    worker <- callr::r_bg(
+      func = function(messages, model, token_file, done_file, error_file) {
+        tryCatch({
+          resp <- httr2::request("http://localhost:11434/api/chat") |>
+            httr2::req_body_json(list(
+              model    = model,
+              messages = messages,
+              stream   = TRUE
+            )) |>
+            httr2::req_perform_connection()
+
+          full_response <- ""
+          done <- FALSE
+
+          repeat {
+            if (done || httr2::resp_stream_is_complete(resp)) break
+            lines <- httr2::resp_stream_lines(resp, lines = 5)
+            if (length(lines) == 0) break
+
+            for (line in lines) {
+              if (nchar(trimws(line)) == 0) next
+              chunk <- tryCatch(jsonlite::fromJSON(line), error = function(e) NULL)
+              if (is.null(chunk)) next
+
+              if (!is.null(chunk$message$content)) {
+                full_response <- paste0(full_response, chunk$message$content)
+                cat(jsonlite::toJSON(
+                  list(token = chunk$message$content), auto_unbox = TRUE
+                ), "\n", file = token_file, append = TRUE)
+              }
+
+              if (isTRUE(chunk$done)) { done <- TRUE; break }
+            }
+          }
+
+          close(resp)
+          writeLines(full_response, done_file)
+
+        }, error = function(e) {
+          writeLines(conditionMessage(e), error_file)
+        })
+      },
+      args = list(
+        messages   = ollama_messages,
+        model      = active_model,
+        token_file = token_file,
+        done_file  = done_file,
+        error_file = error_file
+      )
+    )
+  }
 
   # Poll every 50 ms for new tokens written by the worker.
   # later::later() yields between polls so httpuv stays alive.

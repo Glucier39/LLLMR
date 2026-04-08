@@ -29,6 +29,10 @@
     <div class="header-left">
       <div class="logo">lllmr</div>
       <div class="model-selector">
+        <select id="provider-select" title="Select provider">
+          <option value="ollama">Ollama</option>
+          <option value="claude">Claude API</option>
+        </select>
         <select id="model-select" title="Select model">
           <option value="">loading...</option>
         </select>
@@ -48,6 +52,16 @@
       </button>
     </div>
   </header>
+
+  <!-- API key bar (shown when Claude provider is selected) -->
+  <div id="api-key-bar" class="api-key-bar hidden">
+    <div class="api-key-bar-inner">
+      <span class="api-key-label">Anthropic API key:</span>
+      <input type="password" id="api-key-input" placeholder="sk-ant-..." class="api-key-input"/>
+      <button id="api-key-save" class="btn-tiny-text">Save</button>
+      <span id="api-key-status" class="api-key-status"></span>
+    </div>
+  </div>
 
   <!-- Context bar -->
   <div id="context-bar" class="context-bar">
@@ -98,7 +112,7 @@
       </button>
     </div>
     <div class="input-footer">
-      <span class="input-hint">lllmr runs locally via Ollama — your data never leaves your machine</span>
+      <span class="input-hint" id="provider-hint">lllmr runs locally via Ollama — your data never leaves your machine</span>
     </div>
   </footer>
 
