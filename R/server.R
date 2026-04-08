@@ -9,10 +9,11 @@
 build_app <- function(app_dir, model, ollama_url = "http://localhost:11434") {
 
   # Store mutable state in the package environment
-  .lllmr_env$conversation  <- list()
-  .lllmr_env$active_model  <- model
-  .lllmr_env$ollama_url    <- sub("/$", "", ollama_url)
-  .lllmr_env$cached_context <- NULL   # populated by main session via POST
+  .lllmr_env$conversation      <- list()
+  .lllmr_env$active_model      <- model
+  .lllmr_env$ollama_url        <- sub("/$", "", ollama_url)
+  .lllmr_env$cached_context    <- NULL   # populated by main session via POST
+  .lllmr_env$injected_file_path <- ""     # path of last file successfully injected
   if (is.null(.lllmr_env$claude_api_key)) {
     key <- Sys.getenv("ANTHROPIC_API_KEY")
     if (!nzchar(key)) {
@@ -49,20 +50,11 @@ build_app <- function(app_dir, model, ollama_url = "http://localhost:11434") {
         return(json_response(list(model = .lllmr_env$active_model)))
       }
       
-      # GET /api/context — return context cached from main session
+      # GET /api/context — read live context from the shared file
       if (method == "GET" && path == "/api/context") {
-        ctx <- .lllmr_env$cached_context
+        ctx <- read_context_file()
         if (is.null(ctx)) ctx <- list(summary = "No context yet — gathering...")
         return(json_response(ctx))
-      }
-
-      # POST /api/context/update — receives context pushed from main R session
-      if (method == "POST" && path == "/api/context/update") {
-        body <- parse_request_body(req)
-        if (length(body) > 0) {
-          .lllmr_env$cached_context <- body
-        }
-        return(json_response(list(status = "ok")))
       }
       
       # POST /api/insert
@@ -73,7 +65,8 @@ build_app <- function(app_dir, model, ollama_url = "http://localhost:11434") {
       
       # POST /api/reset
       if (method == "POST" && path == "/api/reset") {
-        .lllmr_env$conversation <- list()
+        .lllmr_env$conversation        <- list()
+        .lllmr_env$injected_file_path  <- ""
         return(json_response(list(status = "ok")))
       }
 
@@ -149,10 +142,22 @@ handle_chat_ws <- function(ws, data) {
     .lllmr_env$active_model
   }
 
-  # Build system prompt — Claude has a 200K context window; Ollama uses num_ctx
-  # 32768 tokens which comfortably fits 20K chars of file content plus history.
-  max_file_chars <- if (provider == "claude") 50000L else 20000L
-  system_prompt <- build_system_prompt(use_context, max_file_chars = max_file_chars)
+  # Read context fresh from the shared file at request time — same pattern that
+  # Cursor/VS Code use: read editor state on-demand, not from a cached/pushed copy.
+  # For Ollama: file content goes only in the first-message injection (not the system
+  # prompt) to avoid doubling input tokens and causing slow first-token latency.
+  # For Claude: file content goes in the system prompt (Claude handles it better there).
+  # Token budget strategy:
+  #   Claude  — file + context in system prompt (handles long system prompts well)
+  #   Ollama  — base system prompt only; context injected into first user message
+  #             This avoids duplicating env/history/file across both roles and
+  #             minimises prompt tokens, which is the primary driver of TTFT on
+  #             local models.
+  max_file_chars  <- if (provider == "claude") 50000L else 5000L
+  ctx_in_prompt   <- if (provider == "claude") use_context else FALSE
+  live_ctx        <- if (use_context) read_context_file() else NULL
+  system_prompt   <- build_system_prompt(ctx_in_prompt, max_file_chars = max_file_chars,
+                                         ctx = live_ctx)
 
   # Resolve any @filename mentions — read those files and append to prompt
   mentioned <- parse_at_mentions(user_message)
@@ -263,20 +268,33 @@ handle_chat_ws <- function(ws, data) {
 
   } else {
     # -- Ollama streaming worker -----------------------------------------------
-    # Inject context into the user message only on the FIRST turn of a session.
-    # Many Ollama models ignore role:system; embedding context in the user turn
-    # guarantees it is seen. Re-injecting every turn doubles the token cost and
-    # quickly overflows the context window.
+    # Inject context into the current user message when:
+    #   (a) no file has been injected yet (first turn / context not ready at startup), or
+    #   (b) the active file has changed since the last injection (user switched files).
+    # On file change, explicitly tell the model the file has changed so it doesn't
+    # confuse old and new content from conversation history.
     ollama_conv <- trimmed_conv
-    is_first_message <- length(ollama_conv) == 1L
-    if (use_context && is_first_message) {
-      ctx_inject <- build_context_injection(.lllmr_env$cached_context,
-                                            max_file_chars = max_file_chars)
+    current_file_path <- if (!is.null(live_ctx) && !is.null(live_ctx$active_file))
+                           live_ctx$active_file$path %||% "" else ""
+    last_injected     <- .lllmr_env$injected_file_path %||% ""
+    file_changed      <- nzchar(current_file_path) && !identical(current_file_path, last_injected)
+    needs_inject      <- use_context && (file_changed || !nzchar(last_injected))
+
+    if (needs_inject) {
+      ctx_inject <- build_context_injection(live_ctx, max_file_chars = max_file_chars,
+                                             include_env = FALSE)
       if (nzchar(ctx_inject)) {
-        enriched <- ollama_conv[[1L]]
-        enriched$content <- paste0(ctx_inject, "---\n\n", enriched$content)
-        ollama_conv[[1L]] <- enriched
+        last_idx <- length(ollama_conv)
+        enriched <- ollama_conv[[last_idx]]
+        prefix <- if (file_changed && nzchar(last_injected))
+          paste0("[File switched to: ", current_file_path, "]\n\n", ctx_inject)
+        else
+          ctx_inject
+        enriched$content <- paste0(prefix, "My question: ", enriched$content)
+        ollama_conv[[last_idx]] <- enriched
+        .lllmr_env$injected_file_path <- current_file_path
       }
+      # ctx_inject empty = context file not ready yet; retry on next message.
     }
 
     ollama_messages <- c(
@@ -284,15 +302,24 @@ handle_chat_ws <- function(ws, data) {
       ollama_conv
     )
 
+    # Size the context window to fit the actual prompt plus response headroom.
+    # Always allocating 32K forces Ollama to build a huge KV cache even for
+    # simple queries, which is the main cause of slow first-token latency.
+    input_chars <- sum(vapply(ollama_messages, function(m) {
+      if (is.character(m$content)) nchar(m$content) else 0L
+    }, integer(1L)))
+    num_ctx <- max(4096L, min(16384L, as.integer(input_chars / 3L) + 2048L))
+
     worker <- callr::r_bg(
-      func = function(messages, model, ollama_url, token_file, done_file, error_file) {
+      func = function(messages, model, ollama_url, num_ctx,
+                      token_file, done_file, error_file) {
         tryCatch({
           resp <- httr2::request(paste0(ollama_url, "/api/chat")) |>
             httr2::req_body_json(list(
               model    = model,
               messages = messages,
               stream   = TRUE,
-              options  = list(num_ctx = 32768L)
+              options  = list(num_ctx = num_ctx)
             )) |>
             httr2::req_perform_connection()
 
@@ -331,6 +358,7 @@ handle_chat_ws <- function(ws, data) {
         messages   = ollama_messages,
         model      = active_model,
         ollama_url = .lllmr_env$ollama_url,
+        num_ctx    = num_ctx,
         token_file = token_file,
         done_file  = done_file,
         error_file = error_file
@@ -556,6 +584,18 @@ serve_static <- function(app_dir, path) {
 
 
 # -- Utilities -----------------------------------------------------------------
+
+#' Read live context from the shared context file written by the main R session.
+#' Returns NULL if the file doesn't exist or can't be parsed.
+#' @keywords internal
+read_context_file <- function() {
+  f <- path.expand("~/.lllmr_context.json")
+  if (!file.exists(f)) return(NULL)
+  tryCatch(
+    jsonlite::fromJSON(f, simplifyDataFrame = FALSE),
+    error = function(e) NULL
+  )
+}
 
 #' Parse JSON request body
 #' @keywords internal

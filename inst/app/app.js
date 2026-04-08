@@ -216,6 +216,8 @@
     scrollToBottom();
   }
 
+  let thinkingTimer = null;
+
   function showThinking() {
     const el = document.createElement('div');
     el.className = 'thinking-indicator';
@@ -223,13 +225,21 @@
     el.innerHTML = `
       <div class="message-content">
         <div class="thinking-dots"><span></span><span></span><span></span></div>
-        <span class="thinking-text">Thinking...</span>
+        <span class="thinking-text" id="thinking-text">Thinking...</span>
       </div>`;
     chatArea.appendChild(el);
     scrollToBottom();
+
+    // Show elapsed seconds so the user knows it's working, not frozen
+    const t0 = Date.now();
+    thinkingTimer = setInterval(() => {
+      const el = document.getElementById('thinking-text');
+      if (el) el.textContent = `Thinking... ${Math.floor((Date.now() - t0) / 1000)}s`;
+    }, 1000);
   }
 
   function removeThinking() {
+    if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
     const el = document.getElementById('thinking');
     if (el) el.remove();
   }
@@ -415,6 +425,12 @@
       });
   }
 
+  // Poll context every 5 seconds so the bar updates once the shared file
+  // is written by the main R session (avoids "Gathering context..." persisting).
+  function startContextPolling() {
+    setInterval(loadContext, 5000);
+  }
+
   // -- New chat ---------------------------------------------------------------
   function resetChat() {
     fetch('/api/reset', { method: 'POST' }).catch(() => {});
@@ -512,8 +528,9 @@
     // Don't fetch context on startup — wait for user to enable the toggle
     bindHintChips();
 
-    // Context always on — load summary into bar
+    // Context always on — load summary into bar and start polling for updates
     loadContext();
+    startContextPolling();
 
     // Sync button visibility to initial state
     updateSendButton();

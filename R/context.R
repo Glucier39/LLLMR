@@ -30,10 +30,13 @@ gather_context <- function() {
 #' @param use_context Logical. Whether to include R session context.
 #' @return A character string system prompt.
 #' @keywords internal
-build_system_prompt <- function(use_context = TRUE, max_file_chars = 50000L) {
+build_system_prompt <- function(use_context = TRUE, max_file_chars = 50000L, ctx = NULL) {
   base_prompt <- paste0(
     "You are lllmr, a helpful R programming assistant running inside RStudio. ",
     "You help with R code, data analysis, debugging, and general programming questions.\n\n",
+    "The user's active R file will be included at the top of their message inside an ",
+    "[Active File: filename] block. Always use that file as the context for their question ",
+    "— never ask them to paste code that is already provided in that block.\n\n",
     "Guidelines:\n",
     "- Be concise and direct — answer the question without preamble\n",
     "- Write clear, idiomatic R code\n",
@@ -45,13 +48,13 @@ build_system_prompt <- function(use_context = TRUE, max_file_chars = 50000L) {
 
   if (!use_context) return(base_prompt)
 
-  ctx <- tryCatch(.lllmr_env$cached_context, error = function(e) NULL)
+  if (is.null(ctx)) ctx <- tryCatch(.lllmr_env$cached_context, error = function(e) NULL)
   if (is.null(ctx)) return(base_prompt)
 
   context_block <- "\n--- R SESSION CONTEXT ---\n"
 
   file_content <- resolve_file_content(ctx$active_file)
-  if (nzchar(file_content)) {
+  if (max_file_chars > 0L && nzchar(file_content)) {
     context_block <- paste0(context_block,
       "\n[Active File: ", ctx$active_file$path, "]\n",
       "```\n", truncate_string(file_content, max_file_chars), "\n```\n"
@@ -76,7 +79,7 @@ build_system_prompt <- function(use_context = TRUE, max_file_chars = 50000L) {
   if (length(ctx$console_history) > 0) {
     context_block <- paste0(context_block,
       "\n[Recent Console History]\n",
-      paste(utils::tail(ctx$console_history, 10), collapse = "\n"), "\n"
+      paste(utils::tail(ctx$console_history, 5), collapse = "\n"), "\n"
     )
   }
 
@@ -160,7 +163,7 @@ get_console_history <- function() {
     utils::savehistory(tmp)
     lines <- readLines(tmp, warn = FALSE)
     unlink(tmp)
-    utils::tail(lines, 30)
+    utils::tail(lines, 10)
   }, error = function(e) character(0))
 }
 
@@ -221,8 +224,10 @@ resolve_file_content <- function(active_file) {
 
 #' Build a compact context block to inject directly into a user message.
 #' Used for providers whose models don't reliably consume system prompts.
+#' @param include_env Whether to include global environment objects.
+#'   For Ollama, skip these — they add tokens without helping with code questions.
 #' @keywords internal
-build_context_injection <- function(ctx, max_file_chars = 30000L) {
+build_context_injection <- function(ctx, max_file_chars = 30000L, include_env = FALSE) {
   if (is.null(ctx)) return("")
   out <- ""
 
@@ -239,7 +244,7 @@ build_context_injection <- function(ctx, max_file_chars = 30000L) {
                   "```r\n", ctx$selection, "\n```\n\n")
   }
 
-  if (length(ctx$environment) > 0) {
+  if (include_env && length(ctx$environment) > 0) {
     env_lines <- vapply(ctx$environment, function(obj) {
       paste0("  ", obj$name, " : ", obj$type, obj$detail)
     }, character(1))

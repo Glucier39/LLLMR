@@ -100,25 +100,38 @@ lllmr_chat <- function(model = NULL,
   # Give the background process a moment to bind the port before opening the UI
   Sys.sleep(1)
 
-  # Start a context refresh loop in THIS (main) R session where rstudioapi works.
-  # Every 3 seconds we gather the active file, selection, and environment then
-  # POST them to the server so the system prompt stays current.
-  local_port <- port
-  push_context <- function() {
-    proc <- .lllmr_env$server_proc
-    if (is.null(proc) || !proc$is_alive()) return()   # server gone, stop loop
-    ctx <- tryCatch(gather_context(), error = function(e) NULL)
-    if (!is.null(ctx)) {
-      tryCatch(
-        httr2::request(paste0("http://127.0.0.1:", local_port, "/api/context/update")) |>
-          httr2::req_body_json(ctx) |>
-          httr2::req_perform(),
-        error = function(e) NULL
-      )
+  # Helper to snapshot current context and persist it to the shared file.
+  # Called synchronously once now, then periodically via later for updates.
+  flush_context <- function(ctx) {
+    if (is.null(ctx)) return(invisible(NULL))
+    ctx_lite <- ctx
+    # For SAVED files: strip content — server reads directly from disk (avoids
+    # JSON round-trip issues and keeps the file small).
+    # For UNSAVED files: keep content — there is no disk path to fall back on.
+    af <- ctx_lite$active_file
+    if (!is.null(af) && !is.null(af$full_path) && nzchar(af$full_path)) {
+      ctx_lite$active_file$content <- NULL
     }
-    later::later(push_context, delay = 3)
+    tmp <- paste0(.lllmr_context_file, ".tmp")
+    tryCatch({
+      writeLines(jsonlite::toJSON(ctx_lite, auto_unbox = TRUE, null = "null"), tmp)
+      file.rename(tmp, .lllmr_context_file)
+    }, error = function(e) NULL)
   }
-  later::later(push_context, delay = 2)
+
+  # Write context synchronously NOW so the file exists before the UI opens.
+  # This eliminates the race where the user sends a message before the first
+  # later() callback fires.
+  flush_context(tryCatch(gather_context(), error = function(e) NULL))
+
+  # Keep refreshing every 3 s so switching files / changing selection updates.
+  write_context <- function() {
+    proc <- .lllmr_env$server_proc
+    if (is.null(proc) || !proc$is_alive()) return()
+    flush_context(tryCatch(gather_context(), error = function(e) NULL))
+    later::later(write_context, delay = 3)
+  }
+  later::later(write_context, delay = 3)
 
   url <- paste0("http://", host, ":", port)
 
@@ -208,6 +221,9 @@ lllmr_status <- function(quiet = FALSE) {
 
 # Lockfile persists the server PID across R sessions for cleanup
 .lllmr_lockfile <- path.expand("~/.lllmr_server.pid")
+
+# Shared context file written by the main session, read by the server process
+.lllmr_context_file <- path.expand("~/.lllmr_context.json")
 
 stop_existing_server <- function() {
   # Kill in-session process handle
