@@ -33,6 +33,7 @@
   const contextSummary = $('#context-summary');
   const stopBtn = $('#stop-btn');
   const newChatBtn = $('#new-chat-btn');
+  const exportBtn = $('#export-btn');
 
   // Available Claude models
   const CLAUDE_MODELS = [
@@ -431,6 +432,32 @@
     setInterval(loadContext, 5000);
   }
 
+  // -- Export chat ------------------------------------------------------------
+  function exportChat() {
+    exportBtn.disabled = true;
+    fetch('/api/export')
+      .then((r) => {
+        if (!r.ok) throw new Error('Export failed');
+        const disposition = r.headers.get('Content-Disposition') || '';
+        const match = disposition.match(/filename="([^"]+)"/);
+        const filename = match ? match[1] : 'lllmr_chat.md';
+        return r.text().then((text) => ({ text, filename }));
+      })
+      .then(({ text, filename }) => {
+        const blob = new Blob([text], { type: 'text/markdown' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      })
+      .catch(() => showError('Export failed. Start a conversation first.'))
+      .finally(() => { exportBtn.disabled = false; });
+  }
+
   // -- New chat ---------------------------------------------------------------
   function resetChat() {
     fetch('/api/reset', { method: 'POST' }).catch(() => {});
@@ -515,6 +542,7 @@
   });
 
   newChatBtn.addEventListener('click', resetChat);
+  exportBtn.addEventListener('click', exportChat);
   providerSelect.addEventListener('change', onProviderChange);
   apiKeySave.addEventListener('click', saveApiKey);
   apiKeyInput.addEventListener('keydown', (e) => {

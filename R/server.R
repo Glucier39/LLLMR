@@ -9,11 +9,13 @@
 build_app <- function(app_dir, model, ollama_url = "http://localhost:11434") {
 
   # Store mutable state in the package environment
-  .lllmr_env$conversation      <- list()
-  .lllmr_env$active_model      <- model
-  .lllmr_env$ollama_url        <- sub("/$", "", ollama_url)
-  .lllmr_env$cached_context    <- NULL   # populated by main session via POST
-  .lllmr_env$injected_file_path <- ""     # path of last file successfully injected
+  .lllmr_env$conversation       <- list()
+  .lllmr_env$active_model       <- model
+  .lllmr_env$ollama_url         <- sub("/$", "", ollama_url)
+  .lllmr_env$cached_context     <- NULL
+  .lllmr_env$injected_file_path <- ""
+  .lllmr_env$active_provider    <- "ollama"
+  .lllmr_env$session_id         <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
   if (is.null(.lllmr_env$claude_api_key)) {
     key <- Sys.getenv("ANTHROPIC_API_KEY")
     if (!nzchar(key)) {
@@ -67,7 +69,27 @@ build_app <- function(app_dir, model, ollama_url = "http://localhost:11434") {
       if (method == "POST" && path == "/api/reset") {
         .lllmr_env$conversation        <- list()
         .lllmr_env$injected_file_path  <- ""
+        .lllmr_env$session_id          <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
         return(json_response(list(status = "ok")))
+      }
+
+      # GET /api/export — download current session as markdown
+      if (method == "GET" && path == "/api/export") {
+        md       <- session_to_markdown(
+          .lllmr_env$conversation,
+          .lllmr_env$active_model   %||% "unknown",
+          .lllmr_env$active_provider %||% "ollama",
+          .lllmr_env$session_id     %||% "unknown"
+        )
+        filename <- paste0("lllmr_", gsub("[ :]", "-", .lllmr_env$session_id %||% "chat"), ".md")
+        return(list(
+          status  = 200L,
+          headers = list(
+            "Content-Type"        = "text/markdown; charset=utf-8",
+            "Content-Disposition" = paste0('attachment; filename="', filename, '"')
+          ),
+          body = chartr("\r", "", md)
+        ))
       }
 
       # GET /api/apikey — check if Claude API key is set
@@ -136,6 +158,7 @@ handle_chat_ws <- function(ws, data) {
   user_message <- data$message
   use_context  <- isTRUE(data$use_context)
   provider     <- if (!is.null(data$provider) && nzchar(data$provider)) data$provider else "ollama"
+  .lllmr_env$active_provider <- provider
   active_model <- if (!is.null(data$model) && nzchar(data$model)) {
     data$model
   } else {
@@ -421,6 +444,17 @@ handle_chat_ws <- function(ws, data) {
         conv <- .lllmr_env$conversation
         conv[[length(conv) + 1L]] <- list(role = "assistant", content = resp)
         .lllmr_env$conversation <- conv
+        # Persist this exchange to the chat log
+        tryCatch(
+          append_chat_log(
+            user_message,
+            resp,
+            active_model,
+            provider,
+            .lllmr_env$session_id %||% format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+          ),
+          error = function(e) NULL
+        )
         safe_send(jsonlite::toJSON(list(type = "done"), auto_unbox = TRUE))
         keep_going <<- FALSE
         return()
